@@ -34,6 +34,6 @@ strip = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSToolbar", "NSToolbarItem", "NSToolbarItemGroup", "NSTextField", "NSButton", "NSImage", "NSFont", "NSControl", "NSView", "NSResponder", "NSCell", "NSColor", "NSGlassEffectView", "NSProgressIndicator", "NSSegmentedControl", "NSText", "NSTextFieldCell", "NSAccessibility", "NSLayoutConstraint", "NSLayoutAnchor", "NSTextView", "NSAlert", "NSBezierPath"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow", "NSToolbar", "NSToolbarItem", "NSToolbarItemGroup", "NSTextField", "NSButton", "NSImage", "NSFont", "NSControl", "NSView", "NSResponder", "NSCell", "NSColor", "NSGlassEffectView", "NSProgressIndicator", "NSSegmentedControl", "NSText", "NSTextFieldCell", "NSAccessibility", "NSLayoutConstraint", "NSLayoutAnchor", "NSTextView", "NSAlert", "NSBezierPath", "NSTitlebarAccessoryViewController", "NSViewController"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSURL", "NSString", "NSArray", "NSSet", "NSGeometry", "NSObject", "NSThread", "NSNotification", "NSRange"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKWebView", "WKNavigation"] }

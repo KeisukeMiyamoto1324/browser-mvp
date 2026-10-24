@@ -1,14 +1,16 @@
 #[cfg(target_os = "macos")]
 mod native_toolbar;
+mod tabs;
 
 use std::sync::Mutex;
-use tauri::{LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl};
+use tauri::{LogicalPosition, LogicalSize, Manager, Webview};
 
 const TOOLBAR_HEIGHT: f64 = if cfg!(target_os = "macos") { 0.0 } else { 64.0 };
 
 #[derive(Default)]
 struct BrowserLaunch {
     toolbar_ready: bool,
+    window_closed: bool,
     pending_address: Option<tauri::Url>,
 }
 
@@ -73,19 +75,14 @@ fn browser_content(toolbar: &Webview) -> Result<Webview, String> {
     if toolbar.label() != "main" {
         return Err("Browser controls are only available to the toolbar.".into());
     }
-    toolbar
-        .app_handle()
-        .get_webview("content")
-        .ok_or_else(|| "The browser WebView is not ready.".into())
+    tabs::active(toolbar.app_handle()).ok_or_else(|| "The browser WebView is not ready.".into())
 }
 
 #[tauri::command]
 async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), String> {
     let content = browser_content(&webview)?;
     let bounds = content_bounds(&webview.window(), viewport_height).map_err(|e| e.to_string())?;
-    content
-        .set_bounds(bounds)
-        .map_err(|error| error.to_string())?;
+    tabs::resize(webview.app_handle(), bounds)?;
     // ---------------------------------------------------------
     // Open the first page only after the toolbar has mounted.
     // ---------------------------------------------------------
@@ -142,12 +139,17 @@ async fn browser_navigation(
     #[cfg(target_os = "macos")]
     {
         let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        let handle = content.app_handle().clone();
+        let label = content.label().to_string();
         content
             .with_webview(move |platform| {
                 // ---------------------------------------------------------
                 // Tauri supplies a live WKWebView on the main thread.
                 // The reference never leaves this callback.
                 // ---------------------------------------------------------
+                if tabs::active(&handle).is_none_or(|active| active.label() != label) {
+                    return;
+                }
                 let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
                 let state = unsafe {
                     match action {
@@ -177,6 +179,7 @@ async fn browser_navigation(
                     }
                 };
                 native_toolbar::update(&state);
+                native_toolbar::update_tabs(&handle);
                 let _ = sender.try_send(state);
             })
             .map_err(|error| error.to_string())?;
@@ -193,12 +196,23 @@ async fn browser_navigation(
 }
 
 // ---------------------------------------------------------
+// Reuse the same native controls when reopening a window.
+// ---------------------------------------------------------
+fn initialize_window(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    native_toolbar::install(window)?;
+    tabs::create(window, "about:blank".parse()?, content_bounds(window, 0.0)?)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------
 // Keep remote content below the fixed-height local toolbar.
 // ---------------------------------------------------------
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(BrowserLaunch::default()))
+        .manage(Mutex::new(tabs::Tabs::default()))
         .menu(|app| {
             let menu = tauri::menu::Menu::default(app)?;
             #[cfg(target_os = "macos")]
@@ -207,14 +221,46 @@ pub fn run() {
                     continue;
                 };
                 match submenu.text()?.as_str() {
-                    "File" => submenu.prepend(&tauri::menu::MenuItem::with_id(
-                        app,
-                        "focus-address",
-                        "Open Location…",
-                        true,
-                        Some("CmdOrCtrl+L"),
-                    )?)?,
+                    "File" => {
+                        submenu.remove_at(0)?;
+                        for (id, label, shortcut) in [
+                            ("new-tab", "New Tab", "CmdOrCtrl+T"),
+                            ("close-tab", "Close Tab", "CmdOrCtrl+W"),
+                            ("reopen-tab", "Reopen Last Closed Tab", "CmdOrCtrl+Shift+T"),
+                            ("focus-address", "Open Location…", "CmdOrCtrl+L"),
+                        ] {
+                            submenu.append(&tauri::menu::MenuItem::with_id(
+                                app,
+                                id,
+                                label,
+                                true,
+                                Some(shortcut),
+                            )?)?;
+                        }
+                    }
+                    "Window" => {
+                        submenu.remove_at(submenu.items()?.len() - 1)?;
+                        submenu.append(&tauri::menu::MenuItem::with_id(
+                            app,
+                            "close-window",
+                            "Close Window",
+                            true,
+                            Some("CmdOrCtrl+Shift+W"),
+                        )?)?;
+                    }
                     "View" => {
+                        for (id, label, shortcut) in [
+                            ("next-tab", "Show Next Tab", "Ctrl+Tab"),
+                            ("previous-tab", "Show Previous Tab", "Ctrl+Shift+Tab"),
+                        ] {
+                            submenu.append(&tauri::menu::MenuItem::with_id(
+                                app,
+                                id,
+                                label,
+                                true,
+                                Some(shortcut),
+                            )?)?;
+                        }
                         submenu.prepend(&tauri::menu::MenuItem::with_id(
                             app,
                             "reload-page",
@@ -235,37 +281,42 @@ pub fn run() {
             }
             Ok(menu)
         })
-        .on_menu_event(|_app, event| {
+        .on_menu_event(|app, event| {
+            let action = event.id().as_ref();
+            if action == "close-window" {
+                if let Some(window) = app.get_window("main") {
+                    let _ = window.close();
+                }
+                return;
+            }
+            if matches!(
+                action,
+                "new-tab" | "close-tab" | "reopen-tab" | "next-tab" | "previous-tab"
+            ) {
+                if let Err(error) = tabs::perform(app, action) {
+                    eprintln!("Tab action failed: {error}");
+                }
+                return;
+            }
             #[cfg(target_os = "macos")]
-            native_toolbar::perform(event.id().as_ref());
+            native_toolbar::perform(action);
         })
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
-            #[cfg(target_os = "macos")]
-            native_toolbar::install(&window)?;
-            let bounds = content_bounds(&window, 0.0)?;
-            let handle = app.handle().clone();
-            let content = tauri::webview::WebviewBuilder::new(
-                "content",
-                WebviewUrl::External("about:blank".parse()?),
-            )
-            .focused(false)
-            .on_navigation(|url| url.as_str() == "about:blank" || is_web_address(url))
-            .on_new_window(move |url, _features| {
-                if is_web_address(&url)
-                    && let Some(content) = handle.get_webview("content")
-                {
-                    let _ = content.navigate(url);
-                }
-                tauri::webview::NewWindowResponse::Deny
-            });
-            window.add_child(content, bounds.position, bounds.size)?;
+            initialize_window(&window)?;
             Ok(())
         })
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::Destroyed = event {
                 native_toolbar::remove();
+                if let Ok(mut launch) = window.state::<Mutex<BrowserLaunch>>().lock() {
+                    launch.window_closed = true;
+                }
+                if let Ok(mut tabs) = window.state::<Mutex<tabs::Tabs>>().lock() {
+                    tabs.entries.clear();
+                    tabs.active.clear();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -276,6 +327,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building browser")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &event
+                && let Ok(mut launch) = app.state::<Mutex<BrowserLaunch>>().lock()
+                && std::mem::take(&mut launch.window_closed)
+            {
+                api.prevent_exit();
+            }
+
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = &event
+                && let Err(error) = tabs::perform(app, "new-tab")
+            {
+                eprintln!("Could not reopen window: {error}");
+            }
             // ---------------------------------------------------------
             // Handle macOS URL-open events during launch and normal use.
             // ---------------------------------------------------------
@@ -284,6 +354,12 @@ pub fn run() {
                 let Some(url) = urls.into_iter().rfind(is_web_address) else {
                     return;
                 };
+                if app.get_window("main").is_none() {
+                    if let Err(error) = tabs::open(app, url) {
+                        eprintln!("Could not open web address: {error}");
+                    }
+                    return;
+                }
                 {
                     let state = app.state::<Mutex<BrowserLaunch>>();
                     let Ok(mut launch) = state.lock() else {
@@ -294,7 +370,7 @@ pub fn run() {
                         return;
                     }
                 }
-                let Some(content) = app.get_webview("content") else {
+                let Some(content) = tabs::active(app) else {
                     return;
                 };
                 if let Err(error) = content.navigate(url) {
