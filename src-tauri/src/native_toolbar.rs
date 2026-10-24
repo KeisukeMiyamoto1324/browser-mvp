@@ -61,6 +61,7 @@ define_class!(
 );
 
 struct ToolbarControls {
+    window: Retained<NSWindow>,
     handle: tauri::AppHandle,
     history: Retained<NSSegmentedControl>,
     address: Retained<AddressField>,
@@ -116,8 +117,17 @@ define_class!(
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _control: &NSControl, _editor: &NSTextView, command: objc2::runtime::Sel) -> bool {
             if command != sel!(cancelOperation:) { return false.into(); }
-            if let Some(window) = self.ivars().address.window() {
-                window.makeFirstResponder(None);
+            let controls = self.ivars();
+            let url = NSString::from_str(&controls.address.ivars().url.borrow());
+            if controls.address.stringValue() != url {
+                controls.address.setStringValue(&url);
+                _editor.setString(&url);
+                unsafe { _editor.selectAll(None); }
+            } else {
+                controls.window.makeFirstResponder(None);
+                if let Some(content) = controls.handle.get_webview("content") {
+                    let _ = content.set_focus();
+                }
             }
             true
         }
@@ -163,7 +173,8 @@ define_class!(
 // ---------------------------------------------------------
 pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().ok_or("Toolbar setup must run on the main thread.")?;
-    let native = unsafe { &*window.ns_window()?.cast::<NSWindow>() };
+    let native = unsafe { Retained::retain(window.ns_window()?.cast::<NSWindow>()) }
+        .ok_or("The native window is not ready.")?;
     let history = NSSegmentedControl::new(mtm);
     history.setControlSize(NSControlSize::Large);
     history.setSegmentCount(2);
@@ -270,6 +281,7 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     address_item.setAutovalidates(false);
     address_item.setEnabled(true);
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
+        window: native.clone(),
         handle: window.app_handle().clone(),
         history,
         address,
@@ -365,11 +377,13 @@ pub fn update(state: &NavigationState) {
         }
         controls.progress.setHidden(!state.loading);
         controls.progress.setDoubleValue(state.progress);
-        if let Some(window) = controls.address.window() {
-            let width = (window.frame().size.width * 0.41).max(220.0);
-            if (controls.address_width.constant() - width).abs() > 0.5 {
-                controls.address_width.setConstant(width);
-            }
+        // ---------------------------------------------------------
+        // AppKit can detach the field into toolbar overflow.
+        // Read the owner window so it can return after resizing.
+        // ---------------------------------------------------------
+        let width = (controls.window.frame().size.width * 0.41).max(220.0);
+        if (controls.address_width.constant() - width).abs() > 0.5 {
+            controls.address_width.setConstant(width);
         }
     });
 }
@@ -391,9 +405,12 @@ pub fn perform(action: &str) {
         };
         let controls = toolbar.ivars();
         if action == "focus-address" {
-            controls
-                .address
-                .setStringValue(&NSString::from_str(&controls.address.ivars().url.borrow()));
+            if let Some(editor) = controls.address.currentEditor() {
+                unsafe {
+                    editor.selectAll(None);
+                }
+                return;
+            }
             controls.address.setAlignment(NSTextAlignment::Left);
             if let Some(window) = controls.address.window() {
                 window.makeFirstResponder(Some(&controls.address));

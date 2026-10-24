@@ -235,12 +235,9 @@ pub fn run() {
             }
             Ok(menu)
         })
-        .on_menu_event(|app, event| {
+        .on_menu_event(|_app, event| {
             #[cfg(target_os = "macos")]
-            {
-                let action = event.id().as_ref().to_string();
-                let _ = app.run_on_main_thread(move || native_toolbar::perform(&action));
-            }
+            native_toolbar::perform(event.id().as_ref());
         })
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
