@@ -11,6 +11,9 @@
       "src/**",
       "package.json",
       "biome.json",
+      "index.html",
+      "tsconfig.json",
+      "vite.config.ts",
       ".vscode/**",
       "!src/assets"
     ]
