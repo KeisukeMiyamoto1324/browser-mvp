@@ -9,6 +9,7 @@
     "ignoreUnknown": true,
     "includes": [
       "src/**",
+      "tools/**",
       "package.json",
       "biome.json",
       "index.html",

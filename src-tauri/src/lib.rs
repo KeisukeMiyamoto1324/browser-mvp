@@ -7,7 +7,6 @@ const TOOLBAR_HEIGHT: f64 = 64.0;
 struct BrowserLaunch {
     toolbar_ready: bool,
     pending_address: Option<tauri::Url>,
-    page_loaded: bool,
 }
 
 // ---------------------------------------------------------
@@ -107,42 +106,84 @@ async fn navigate(webview: Webview, address: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-async fn browser_url(webview: Webview) -> Result<String, String> {
-    let content = browser_content(&webview)?;
-    // ---------------------------------------------------------
-    // WKWebView may have no URL before its first page load.
-    // ---------------------------------------------------------
-    let page_loaded = webview
-        .state::<Mutex<BrowserLaunch>>()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .page_loaded;
-    if !page_loaded {
-        return Ok("https://duckduckgo.com/".into());
-    }
-    content
-        .url()
-        .map(|url| url.to_string())
-        .map_err(|error| error.to_string())
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Direction {
+enum NavigationAction {
     Back,
     Forward,
+    Reload,
+    Stop,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NavigationState {
+    url: String,
+    can_go_back: bool,
+    can_go_forward: bool,
+    loading: bool,
+    progress: f64,
+}
+
+// ---------------------------------------------------------
+// Read and control WebKit on its owning main thread.
+// Remote page scripts cannot forge native navigation state.
+// ---------------------------------------------------------
 #[tauri::command]
-async fn navigate_history(webview: Webview, direction: Direction) -> Result<(), String> {
-    let script = match direction {
-        Direction::Back => "window.history.back()",
-        Direction::Forward => "window.history.forward()",
-    };
-    browser_content(&webview)?
-        .eval(script)
-        .map_err(|error| error.to_string())
+async fn browser_navigation(
+    webview: Webview,
+    action: Option<NavigationAction>,
+) -> Result<NavigationState, String> {
+    let content = browser_content(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        content
+            .with_webview(move |platform| {
+                // ---------------------------------------------------------
+                // Tauri supplies a live WKWebView on the main thread.
+                // The reference never leaves this callback.
+                // ---------------------------------------------------------
+                let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
+                let state = unsafe {
+                    match action {
+                        Some(NavigationAction::Back) if native.canGoBack() => {
+                            native.goBack();
+                        }
+                        Some(NavigationAction::Forward) if native.canGoForward() => {
+                            native.goForward();
+                        }
+                        Some(NavigationAction::Reload) => {
+                            native.reload();
+                        }
+                        Some(NavigationAction::Stop) => native.stopLoading(),
+                        _ => {}
+                    }
+                    NavigationState {
+                        url: native
+                            .URL()
+                            .and_then(|url| url.absoluteString())
+                            .map(|url| url.to_string())
+                            .unwrap_or_default(),
+                        can_go_back: native.canGoBack(),
+                        can_go_forward: native.canGoForward(),
+                        loading: native.isLoading(),
+                        progress: native.estimatedProgress(),
+                    }
+                };
+                let _ = sender.try_send(state);
+            })
+            .map_err(|error| error.to_string())?;
+        receiver
+            .recv()
+            .await
+            .ok_or_else(|| "The browser WebView was closed.".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (content, action);
+        Err("Native navigation is currently supported on macOS only.".into())
+    }
 }
 
 // ---------------------------------------------------------
@@ -161,14 +202,6 @@ pub fn run() {
                 WebviewUrl::External("about:blank".parse()?),
             )
             .on_navigation(|url| url.as_str() == "about:blank" || is_web_address(url))
-            .on_page_load(|content, payload| {
-                if payload.event() != tauri::webview::PageLoadEvent::Finished {
-                    return;
-                }
-                if let Ok(mut launch) = content.state::<Mutex<BrowserLaunch>>().lock() {
-                    launch.page_loaded = true;
-                }
-            })
             .on_new_window(move |url, _features| {
                 if is_web_address(&url)
                     && let Some(content) = handle.get_webview("content")
@@ -183,8 +216,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             resize_content,
             navigate,
-            browser_url,
-            navigate_history
+            browser_navigation
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")

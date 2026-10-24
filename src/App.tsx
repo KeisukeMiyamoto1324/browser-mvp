@@ -8,6 +8,14 @@ import {
   useState,
 } from "react";
 
+type NavigationState = {
+  url: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  loading: boolean;
+  progress: number;
+};
+
 // ---------------------------------------------------------
 // Control the native content WebView from the local toolbar.
 // ---------------------------------------------------------
@@ -15,6 +23,13 @@ export default function App(): JSX.Element {
   const [address, setAddress] = useState("https://duckduckgo.com/");
   const [error, setError] = useState("");
   const editing = useRef(false);
+  const [navigation, setNavigation] = useState<NavigationState>({
+    url: "",
+    canGoBack: false,
+    canGoForward: false,
+    loading: false,
+    progress: 0,
+  });
 
   useEffect((): (() => void) => {
     let active = true;
@@ -27,18 +42,25 @@ export default function App(): JSX.Element {
     }
     async function updateAddress(): Promise<void> {
       try {
-        const url = await invoke<string>("browser_url");
-        if (active && !editing.current) setAddress(url);
+        const state = await invoke<NavigationState>("browser_navigation");
+        if (!active) return;
+        setNavigation(state);
+        if (!editing.current && state.url) setAddress(state.url);
       } catch (cause: unknown) {
         if (active) setError(String(cause));
       }
     }
     resizeContent();
     window.addEventListener("resize", resizeContent);
-    void updateAddress();
-    const timer = window.setInterval((): void => {
-      void updateAddress();
-    }, 500);
+    let timer: number;
+    async function pollNavigation(): Promise<void> {
+      await updateAddress();
+      if (active)
+        timer = window.setTimeout((): void => {
+          void pollNavigation();
+        }, 100);
+    }
+    void pollNavigation();
     return (): void => {
       active = false;
       window.removeEventListener("resize", resizeContent);
@@ -59,10 +81,14 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function navigateHistory(direction: "back" | "forward"): Promise<void> {
+  async function controlNavigation(
+    action: "back" | "forward" | "reload" | "stop",
+  ): Promise<void> {
     setError("");
     try {
-      await invoke("navigate_history", { direction });
+      setNavigation(
+        await invoke<NavigationState>("browser_navigation", { action }),
+      );
     } catch (cause: unknown) {
       setError(String(cause));
     }
@@ -73,10 +99,11 @@ export default function App(): JSX.Element {
       <nav className="toolbar" aria-label="Browser controls">
         <button
           type="button"
+          disabled={!navigation.canGoBack}
           aria-label="Back"
           title="Back"
           onClick={(): void => {
-            void navigateHistory("back");
+            void controlNavigation("back");
           }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -85,10 +112,11 @@ export default function App(): JSX.Element {
         </button>
         <button
           type="button"
+          disabled={!navigation.canGoForward}
           aria-label="Forward"
           title="Forward"
           onClick={(): void => {
-            void navigateHistory("forward");
+            void controlNavigation("forward");
           }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -119,6 +147,31 @@ export default function App(): JSX.Element {
               setAddress(event.target.value);
             }}
           />
+          <button
+            className="reload"
+            type="button"
+            aria-label={
+              navigation.loading ? "Stop loading" : "Reload this page"
+            }
+            title={navigation.loading ? "Stop loading" : "Reload this page"}
+            onClick={(): void => {
+              void controlNavigation(navigation.loading ? "stop" : "reload");
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              {navigation.loading ? (
+                <path d="m7 7 10 10M17 7 7 17" />
+              ) : (
+                <path d="M19 10a7 7 0 1 0 0 5M19 4v6h-6" />
+              )}
+            </svg>
+          </button>
+          {navigation.loading && (
+            <span
+              className="load-progress"
+              style={{ width: `${navigation.progress * 100}%` }}
+            />
+          )}
         </form>
         <span className="error" role="status">
           {error}
