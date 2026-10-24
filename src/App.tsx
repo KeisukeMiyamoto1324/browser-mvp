@@ -10,6 +10,7 @@ import {
 
 type NavigationState = {
   url: string;
+  nativeToolbar: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
   loading: boolean;
@@ -25,6 +26,7 @@ export default function App(): JSX.Element {
   const editing = useRef(false);
   const [navigation, setNavigation] = useState<NavigationState>({
     url: "",
+    nativeToolbar: false,
     canGoBack: false,
     canGoForward: false,
     loading: false,
@@ -93,6 +95,8 @@ export default function App(): JSX.Element {
       setError(String(cause));
     }
   }
+
+  if (navigation.nativeToolbar) return <main />;
 
   return (
     <main>

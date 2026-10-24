@@ -1,7 +1,10 @@
+#[cfg(target_os = "macos")]
+mod native_toolbar;
+
 use std::sync::Mutex;
 use tauri::{LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl};
 
-const TOOLBAR_HEIGHT: f64 = 64.0;
+const TOOLBAR_HEIGHT: f64 = if cfg!(target_os = "macos") { 0.0 } else { 64.0 };
 
 #[derive(Default)]
 struct BrowserLaunch {
@@ -119,6 +122,7 @@ enum NavigationAction {
 #[serde(rename_all = "camelCase")]
 struct NavigationState {
     url: String,
+    native_toolbar: bool,
     can_go_back: bool,
     can_go_forward: bool,
     loading: bool,
@@ -160,6 +164,7 @@ async fn browser_navigation(
                         _ => {}
                     }
                     NavigationState {
+                        native_toolbar: true,
                         url: native
                             .URL()
                             .and_then(|url| url.absoluteString())
@@ -171,6 +176,7 @@ async fn browser_navigation(
                         progress: native.estimatedProgress(),
                     }
                 };
+                native_toolbar::update(&state);
                 let _ = sender.try_send(state);
             })
             .map_err(|error| error.to_string())?;
@@ -193,14 +199,60 @@ async fn browser_navigation(
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(BrowserLaunch::default()))
+        .menu(|app| {
+            let menu = tauri::menu::Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            for item in menu.items()? {
+                let Some(submenu) = item.as_submenu() else {
+                    continue;
+                };
+                match submenu.text()?.as_str() {
+                    "File" => submenu.prepend(&tauri::menu::MenuItem::with_id(
+                        app,
+                        "focus-address",
+                        "Open Location…",
+                        true,
+                        Some("CmdOrCtrl+L"),
+                    )?)?,
+                    "View" => {
+                        submenu.prepend(&tauri::menu::MenuItem::with_id(
+                            app,
+                            "reload-page",
+                            "Reload Page",
+                            true,
+                            Some("CmdOrCtrl+R"),
+                        )?)?;
+                        submenu.prepend(&tauri::menu::MenuItem::with_id(
+                            app,
+                            "stop-page",
+                            "Stop",
+                            true,
+                            Some("CmdOrCtrl+."),
+                        )?)?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            #[cfg(target_os = "macos")]
+            {
+                let action = event.id().as_ref().to_string();
+                let _ = app.run_on_main_thread(move || native_toolbar::perform(&action));
+            }
+        })
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
+            #[cfg(target_os = "macos")]
+            native_toolbar::install(&window)?;
             let bounds = content_bounds(&window, 0.0)?;
             let handle = app.handle().clone();
             let content = tauri::webview::WebviewBuilder::new(
                 "content",
                 WebviewUrl::External("about:blank".parse()?),
             )
+            .focused(false)
             .on_navigation(|url| url.as_str() == "about:blank" || is_web_address(url))
             .on_new_window(move |url, _features| {
                 if is_web_address(&url)
@@ -212,6 +264,12 @@ pub fn run() {
             });
             window.add_child(content, bounds.position, bounds.size)?;
             Ok(())
+        })
+        .on_window_event(|_window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::Destroyed = event {
+                native_toolbar::remove();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             resize_content,
