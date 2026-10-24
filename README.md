@@ -26,8 +26,9 @@ Apple's [browser passkey entitlement requirements](https://developer.apple.com/d
 | --- | --- |
 | Declare HTTP and HTTPS support | `src-tauri/Info.plist` registers both schemes with the Viewer role. |
 | Provide a URL field, search, or bookmarks on launch | The React toolbar provides a URL field and DuckDuckGo search. Bookmarks are not required when these are available. |
-| Open the requested URL and render its content | A native WKWebView loads HTTP and HTTPS directly. The macOS `Opened` event handles incoming URLs both before WebView setup and while the app is running. |
+| Open the requested URL and render its content | A native WKWebView loads HTTP and HTTPS directly. The macOS `Opened` event queues URLs until the local toolbar is ready and opens later URLs in the running window. |
 | Preserve the destination and site content | Explicit web URLs keep their path, query, and fragment. Only non-address input becomes a search. No scripts replace site content. Back/Forward uses the page's history API. |
+| Support WebAuthn for web content | The content WebView uses WebKit's built-in WebAuthn implementation. The request form also requires integration with iCloud Keychain for both registration and authentication after Apple grants the entitlement. That flow requires a separately approved, signed build. |
 
 The app uses one content WebView. If macOS sends several web URLs at once, the last one is displayed. Non-web URLs are ignored. Opening an external URL brings the browser window forward without changing the system's default browser.
 
@@ -42,6 +43,8 @@ Inspect its URL registration with `/usr/libexec/PlistBuddy -c 'Print :CFBundleUR
 With the app closed, run `/usr/bin/open -a "$PWD/src-tauri/target/debug/bundle/macos/browser.app" 'https://tauri.app/start/?source=browser-review#content'` to check URL delivery during launch. Repeat with the app running to check delivery to the existing window. Check that the destination appears in the content WebView and the address field. Use an HTTP site as well, and verify that the site's own redirects are reflected in the address field. Test Back, Forward, and keyword search from the toolbar.
 
 The `open` command above is a manual OS integration check; Rust tests cover URL classification, rejection of non-web schemes, and preservation of complete web addresses. `cargo test` does not prove LaunchServices delivery.
+
+Local verification on macOS on 2026-10-24 covered ordinary launch, cold launch from external HTTP and HTTPS URLs, URL delivery while running, server redirects, search, and Back/Forward. The toolbar remained available, and the URL field matched the content destination. A localhost test page reported `PublicKeyCredential`, `navigator.credentials.create`, and `navigator.credentials.get` as available in a secure context. These API checks do not prove successful passkey registration or authentication.
 
 ### Request and enable the entitlement
 

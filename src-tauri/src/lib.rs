@@ -4,7 +4,11 @@ use tauri::{LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl};
 const TOOLBAR_HEIGHT: f64 = 64.0;
 
 #[derive(Default)]
-struct PendingAddress(Mutex<Option<tauri::Url>>);
+struct BrowserLaunch {
+    toolbar_ready: bool,
+    pending_address: Option<tauri::Url>,
+    page_loaded: bool,
+}
 
 // ---------------------------------------------------------
 // Accept only web URLs without changing their destination.
@@ -79,7 +83,21 @@ async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), St
     let bounds = content_bounds(&webview.window(), viewport_height).map_err(|e| e.to_string())?;
     content
         .set_bounds(bounds)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // ---------------------------------------------------------
+    // Open the first page only after the toolbar has mounted.
+    // ---------------------------------------------------------
+    let address = {
+        let state = webview.state::<Mutex<BrowserLaunch>>();
+        let mut launch = state.lock().map_err(|error| error.to_string())?;
+        if launch.toolbar_ready {
+            return Ok(());
+        }
+        launch.toolbar_ready = true;
+        launch.pending_address.take()
+    };
+    let address = address.unwrap_or(resolve_address("https://duckduckgo.com/")?);
+    content.navigate(address).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -91,7 +109,19 @@ async fn navigate(webview: Webview, address: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn browser_url(webview: Webview) -> Result<String, String> {
-    browser_content(&webview)?
+    let content = browser_content(&webview)?;
+    // ---------------------------------------------------------
+    // WKWebView may have no URL before its first page load.
+    // ---------------------------------------------------------
+    let page_loaded = webview
+        .state::<Mutex<BrowserLaunch>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .page_loaded;
+    if !page_loaded {
+        return Ok("https://duckduckgo.com/".into());
+    }
+    content
         .url()
         .map(|url| url.to_string())
         .map_err(|error| error.to_string())
@@ -121,23 +151,24 @@ async fn navigate_history(webview: Webview, direction: Direction) -> Result<(), 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(PendingAddress::default())
+        .manage(Mutex::new(BrowserLaunch::default()))
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
             let bounds = content_bounds(&window, 0.0)?;
             let handle = app.handle().clone();
-            let initial_address = app
-                .state::<PendingAddress>()
-                .0
-                .lock()
-                .map_err(|_| "Pending address could not be read.")?
-                .take()
-                .unwrap_or("https://duckduckgo.com/".parse()?);
             let content = tauri::webview::WebviewBuilder::new(
                 "content",
-                WebviewUrl::External(initial_address),
+                WebviewUrl::External("about:blank".parse()?),
             )
-            .on_navigation(is_web_address)
+            .on_navigation(|url| url.as_str() == "about:blank" || is_web_address(url))
+            .on_page_load(|content, payload| {
+                if payload.event() != tauri::webview::PageLoadEvent::Finished {
+                    return;
+                }
+                if let Ok(mut launch) = content.state::<Mutex<BrowserLaunch>>().lock() {
+                    launch.page_loaded = true;
+                }
+            })
             .on_new_window(move |url, _features| {
                 if is_web_address(&url)
                     && let Some(content) = handle.get_webview("content")
@@ -166,10 +197,17 @@ pub fn run() {
                 let Some(url) = urls.into_iter().rfind(is_web_address) else {
                     return;
                 };
-                let Some(content) = app.get_webview("content") else {
-                    if let Ok(mut pending) = app.state::<PendingAddress>().0.lock() {
-                        *pending = Some(url);
+                {
+                    let state = app.state::<Mutex<BrowserLaunch>>();
+                    let Ok(mut launch) = state.lock() else {
+                        return;
+                    };
+                    if !launch.toolbar_ready {
+                        launch.pending_address = Some(url);
+                        return;
                     }
+                }
+                let Some(content) = app.get_webview("content") else {
                     return;
                 };
                 if let Err(error) = content.navigate(url) {
