@@ -1,12 +1,14 @@
 # Tauri + React + TypeScript
 
-This app uses React, TypeScript, and Vite for the frontend and Tauri 2 with Rust for native commands.
+This browser uses React, TypeScript, and Vite for the toolbar and Tauri 2 with Rust for a native content WebView.
+
+The toolbar provides Back, Forward, and an address/search field. Press Enter to open a URL or search DuckDuckGo. Links that request a new window open in the same WebView.
 
 ## Development
 
 Install dependencies with `npm install`, then start the desktop app with `npm run tauri dev`.
 
-Use `npm run dev` for the frontend only. The greeting command needs the Tauri desktop app.
+Use `npm run dev` for the toolbar only. Browsing needs the Tauri desktop app. The content WebView uses Tauri's `unstable` multi-WebView feature. Remote websites have no Tauri permissions.
 
 ## Checks and builds
 
