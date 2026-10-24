@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "macOS": { "minimumSystemVersion": "26.0" },
     "targets": "all",
     "icon": [
       "icons/32x32.png",
