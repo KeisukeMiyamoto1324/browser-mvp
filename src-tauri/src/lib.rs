@@ -1,6 +1,17 @@
+use std::sync::Mutex;
 use tauri::{LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl};
 
 const TOOLBAR_HEIGHT: f64 = 64.0;
+
+#[derive(Default)]
+struct PendingAddress(Mutex<Option<tauri::Url>>);
+
+// ---------------------------------------------------------
+// Accept only web URLs without changing their destination.
+// ---------------------------------------------------------
+fn is_web_address(url: &tauri::Url) -> bool {
+    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+}
 
 // ---------------------------------------------------------
 // Account for the macOS title bar in child WebView coordinates.
@@ -28,10 +39,9 @@ fn resolve_address(input: &str) -> Result<tauri::Url, String> {
     }
     if input.contains("://") {
         let url = tauri::Url::parse(input).map_err(|error| error.to_string())?;
-        return match url.scheme() {
-            "http" | "https" if url.host_str().is_some() => Ok(url),
-            _ => Err("Only HTTP and HTTPS addresses are supported.".into()),
-        };
+        return is_web_address(&url)
+            .then_some(url)
+            .ok_or_else(|| "Only HTTP and HTTPS addresses are supported.".into());
     }
     let host = input.split('/').next().unwrap_or_default();
     if !input.chars().any(char::is_whitespace)
@@ -111,17 +121,25 @@ async fn navigate_history(webview: Webview, direction: Direction) -> Result<(), 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(PendingAddress::default())
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
             let bounds = content_bounds(&window, 0.0)?;
             let handle = app.handle().clone();
+            let initial_address = app
+                .state::<PendingAddress>()
+                .0
+                .lock()
+                .map_err(|_| "Pending address could not be read.")?
+                .take()
+                .unwrap_or("https://duckduckgo.com/".parse()?);
             let content = tauri::webview::WebviewBuilder::new(
                 "content",
-                WebviewUrl::External("https://duckduckgo.com/".parse()?),
+                WebviewUrl::External(initial_address),
             )
-            .on_navigation(|url| matches!(url.scheme(), "http" | "https"))
+            .on_navigation(is_web_address)
             .on_new_window(move |url, _features| {
-                if matches!(url.scheme(), "http" | "https")
+                if is_web_address(&url)
                     && let Some(content) = handle.get_webview("content")
                 {
                     let _ = content.navigate(url);
@@ -137,13 +155,59 @@ pub fn run() {
             browser_url,
             navigate_history
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running browser");
+        .build(tauri::generate_context!())
+        .expect("error while building browser")
+        .run(|app, event| {
+            // ---------------------------------------------------------
+            // Handle macOS URL-open events during launch and normal use.
+            // ---------------------------------------------------------
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = event {
+                let Some(url) = urls.into_iter().rfind(is_web_address) else {
+                    return;
+                };
+                let Some(content) = app.get_webview("content") else {
+                    if let Ok(mut pending) = app.state::<PendingAddress>().0.lock() {
+                        *pending = Some(url);
+                    }
+                    return;
+                };
+                if let Err(error) = content.navigate(url) {
+                    eprintln!("Could not open web address: {error}");
+                }
+                let window = content.window();
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_address;
+    use super::{is_web_address, resolve_address};
+
+    #[test]
+    fn preserves_web_destinations_and_rejects_other_schemes() -> Result<(), String> {
+        for input in [
+            "http://example.com/path?value=1&next=2#section",
+            "https://example.com/path?value=1&next=2#section",
+        ] {
+            let url = tauri::Url::parse(input).map_err(|e| e.to_string())?;
+            assert!(is_web_address(&url));
+            assert_eq!(resolve_address(input)?.as_str(), input);
+        }
+        for input in [
+            "file:///etc/hosts",
+            "javascript:alert(1)",
+            "tauri://localhost",
+            "mailto:test@example.com",
+        ] {
+            let url = tauri::Url::parse(input).map_err(|e| e.to_string())?;
+            assert!(!is_web_address(&url));
+        }
+        Ok(())
+    }
 
     #[test]
     fn resolves_addresses_and_search_queries() -> Result<(), String> {
