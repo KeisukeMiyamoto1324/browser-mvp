@@ -35,10 +35,10 @@ button {
   border-radius: 8px;
   cursor: pointer;
 }
-button:hover {
+button:hover:not(:disabled) {
   background: #e3e6eb;
 }
-button:active {
+button:active:not(:disabled) {
   background: #d6dae1;
 }
 svg {
@@ -51,6 +51,7 @@ svg {
   stroke-linejoin: round;
 }
 form {
+  position: relative;
   flex: 1;
   min-width: 0;
   margin-left: 6px;
@@ -58,7 +59,7 @@ form {
 input {
   width: 100%;
   height: 36px;
-  padding: 0 14px;
+  padding: 0 42px 0 14px;
   border: 1px solid #dfe2e7;
   border-radius: 9px;
   background: #fff;
@@ -94,13 +95,44 @@ button:focus-visible {
     background: #30333a;
     border-color: #454951;
   }
-  button:hover {
+  button:hover:not(:disabled) {
     background: #363940;
   }
-  button:active {
+  button:active:not(:disabled) {
     background: #424650;
   }
   .error {
     color: #ffaaa2;
+  }
+}
+
+button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.reload {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+}
+.reload svg {
+  width: 17px;
+  height: 17px;
+}
+.load-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: #3976d8;
+  transition: width 120ms linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .load-progress {
+    transition: none;
   }
 }
