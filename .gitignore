@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Repository-local agent skill
+/.agents/skills/browser-passkeys/
