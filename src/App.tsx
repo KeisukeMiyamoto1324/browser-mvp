@@ -45,8 +45,7 @@ export default function App(): JSX.Element {
         const state = await invoke<NavigationState>("browser_navigation");
         if (!active) return;
         setNavigation(state);
-        if (!editing.current && state.url && state.url !== "about:blank")
-          setAddress(state.url);
+        if (!editing.current && state.url) setAddress(state.url);
       } catch (cause: unknown) {
         if (active) setError(String(cause));
       }

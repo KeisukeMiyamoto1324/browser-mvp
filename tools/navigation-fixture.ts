@@ -27,7 +27,7 @@ createServer((request: IncomingMessage, response: ServerResponse): void => {
 <h1>Navigation ${path}</h1><p>Request ${visits}</p>
 <p><a href="/one">Page one</a> · <a href="/two">Page two</a> ·
 <a href="/redirect">Redirect</a> · <a href="/slow">Slow page</a> ·
-<a href="#section">Same-document anchor</a></p>
+<a href="#section">Same-document anchor</a> · <a href="about:blank">Blank page</a></p>
 <button onclick="history.back=()=>{};history.forward=()=>{};this.textContent='Page history methods replaced'">Replace page history methods</button>
 <h2 id="section">Section</h2>`);
   if (path !== "/slow") {

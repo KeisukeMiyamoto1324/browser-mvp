@@ -15,6 +15,7 @@ Run `node --experimental-strip-types tools/navigation-fixture.ts`, build with `n
 | Redirect after going Back | Final address is `/two`; Forward disabled |
 | Slow response | Stop loading replaces Reload; blue progress line visible |
 | Stop during slow response | Reload returns without waiting for the 30-second response |
+| Blank page, then Back | Address shows `about:blank`, then returns to `/one`; Forward enabled |
 
 Paired local reference/application screenshots were captured for page one, Back, loading, and stopped states under `/tmp/browser-interface-review`. The reference showed the same Back/Forward availability and Stop/Reload state changes for these operations. Captures contain personal toolbar items and remain local.
 
