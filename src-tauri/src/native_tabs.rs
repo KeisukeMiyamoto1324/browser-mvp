@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use objc2::rc::Retained;
@@ -9,7 +10,7 @@ use objc2_foundation::{
 };
 use tauri::Manager;
 
-use crate::tabs::{Tab, Tabs};
+use crate::tabs::{Tab, Windows};
 
 type StripSnapshot = (Vec<Tab>, String, u64);
 
@@ -20,7 +21,7 @@ struct TabStrip {
 }
 
 thread_local! {
-    static STRIP: RefCell<Option<TabStrip>> = const { RefCell::new(None) };
+    static STRIP: RefCell<HashMap<String, TabStrip>> = RefCell::new(HashMap::new());
 }
 
 // ---------------------------------------------------------
@@ -43,9 +44,11 @@ define_class!(
     }
 );
 
+#[derive(Clone)]
 struct TabAction {
     handle: tauri::AppHandle,
     label: String,
+    window_label: String,
     close: bool,
 }
 
@@ -66,10 +69,11 @@ define_class!(
         fn activate(&self, _sender: &NSButton) {
             let handle = self.ivars().handle.clone();
             let label = self.ivars().label.clone();
+            let window = self.ivars().window_label.clone();
             let result = if self.ivars().close {
-                crate::tabs::close_tab(&handle, &label)
+                crate::tabs::close_tab(&handle, &window, &label)
             } else {
-                crate::tabs::select(&handle, &label)
+                crate::tabs::select(&handle, &window, &label)
             };
             if let Err(error) = result { eprintln!("Tab action failed: {error}"); }
         }
@@ -77,19 +81,14 @@ define_class!(
 );
 
 fn button(
-    app: &tauri::AppHandle,
-    tab: &Tab,
+    action: TabAction,
     title: &str,
     frame: NSRect,
-    close: bool,
     selected: bool,
     mtm: MainThreadMarker,
 ) -> Retained<TabButton> {
-    let button = TabButton::alloc(mtm).set_ivars(TabAction {
-        handle: app.clone(),
-        label: tab.label.clone(),
-        close,
-    });
+    let close = action.close;
+    let button = TabButton::alloc(mtm).set_ivars(action);
     let button: Retained<TabButton> = unsafe { msg_send![super(button), initWithFrame: frame] };
     button.setBordered(false);
     button.setFont(Some(&NSFont::systemFontOfSize(13.0)));
@@ -162,29 +161,35 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     accessory.setFullScreenMinHeight(38.0);
     native.addTitlebarAccessoryViewController(&accessory);
     STRIP.with(|slot| {
-        *slot.borrow_mut() = Some(TabStrip {
-            scroll,
-            document,
-            snapshot: None,
-        })
+        slot.borrow_mut().insert(
+            window.label().to_string(),
+            TabStrip {
+                scroll,
+                document,
+                snapshot: None,
+            },
+        );
     });
     Ok(())
 }
 
-pub fn update(app: &tauri::AppHandle) {
+pub fn update(app: &tauri::AppHandle, window_label: &str) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let (entries, active) = {
-        let state = app.state::<Mutex<Tabs>>();
-        let Ok(tabs) = state.lock() else {
+        let state = app.state::<Mutex<Windows>>();
+        let Ok(windows) = state.lock() else {
+            return;
+        };
+        let Some(tabs) = windows.entries.get(window_label) else {
             return;
         };
         (tabs.entries.clone(), tabs.active.clone())
     };
     STRIP.with(|slot| {
         let mut borrowed = slot.borrow_mut();
-        let Some(strip) = borrowed.as_mut() else {
+        let Some(strip) = borrowed.get_mut(window_label) else {
             return;
         };
         let available = strip.scroll.contentSize().width.max(1.0);
@@ -225,23 +230,28 @@ pub fn update(app: &tauri::AppHandle) {
                 glass.setCornerRadius(15.0);
                 cell.addSubview(&glass);
             }
+            let action = TabAction {
+                handle: app.clone(),
+                label: tab.label.clone(),
+                window_label: window_label.into(),
+                close: false,
+            };
             let label = button(
-                app,
-                tab,
+                action.clone(),
                 title,
                 NSRect::new(NSPoint::new(32.0, 0.0), NSSize::new(width - 64.0, 32.0)),
-                false,
                 selected,
                 mtm,
             );
             label.setToolTip(Some(&NSString::from_str(title)));
             cell.addSubview(&label);
             let close = button(
-                app,
-                tab,
+                TabAction {
+                    close: true,
+                    ..action
+                },
                 title,
                 NSRect::new(NSPoint::new(4.0, 4.0), NSSize::new(24.0, 24.0)),
-                true,
                 false,
                 mtm,
             );
@@ -254,8 +264,8 @@ pub fn update(app: &tauri::AppHandle) {
     });
 }
 
-pub fn remove() {
+pub fn remove(window_label: &str) {
     STRIP.with(|slot| {
-        slot.borrow_mut().take();
+        slot.borrow_mut().remove(window_label);
     });
 }

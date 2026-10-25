@@ -30,6 +30,7 @@ createServer((request: IncomingMessage, response: ServerResponse): void => {
 <a href="#section">Same-document anchor</a> · <a href="about:blank">Blank page</a></p>
 <button onclick="history.back=()=>{};history.forward=()=>{};this.textContent='Page history methods replaced'">Replace page history methods</button>
 <p><a href="/popup" target="_blank">Open new tab</a></p>
+<button onclick="window.open('/window-popup','_blank','width=700,height=500')">Open popup window</button>
 <label>Tab note <input aria-label="Tab note"></label>
 <div style="height:1400px"></div><h2 id="section">Section</h2>`);
   if (path !== "/slow") {
