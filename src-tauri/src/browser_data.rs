@@ -127,6 +127,9 @@ impl Store {
 }
 
 pub fn snapshot(tabs: &crate::tabs::Tabs) -> SessionWindow {
+    if let Some(pending) = &tabs.pending_restore {
+        return pending.clone();
+    }
     SessionWindow {
         is_window: true,
         closed_at: 0,
@@ -273,6 +276,30 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].tabs[0].interaction, vec![9]);
         assert_eq!(restored[0].active, 0);
+    }
+
+    #[test]
+    fn startup_checkpoints_preserve_the_pending_session() {
+        let session = SessionWindow {
+            tabs: vec![SessionTab {
+                url: "https://example.com/document".into(),
+                title: "Saved document".into(),
+                interaction: vec![1, 7, 9],
+            }],
+            ..Default::default()
+        };
+        let mut windows = crate::tabs::Windows::default();
+        windows.entries.insert(
+            "main".into(),
+            crate::tabs::Tabs {
+                pending_restore: Some(session),
+                ..Default::default()
+            },
+        );
+        let restored = sessions(&windows);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].tabs[0].url, "https://example.com/document");
+        assert_eq!(restored[0].tabs[0].interaction, vec![1, 7, 9]);
     }
 
     #[test]

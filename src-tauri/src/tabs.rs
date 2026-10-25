@@ -221,7 +221,10 @@ pub fn page_loaded(view: Webview, payload: tauri::webview::PageLoadPayload<'_>) 
         if let Ok(mut store) = state.lock() {
             store.record(payload.url().as_str(), &persistent.1);
         }
-        capture(view.app_handle(), view.window().label());
+        if let Err(error) = capture(view.app_handle(), view.window().label()) {
+            eprintln!("Could not capture document state: {error}");
+            return;
+        }
         crate::browser_data::checkpoint(view.app_handle());
     }
 }
@@ -242,7 +245,7 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
         }
         (tabs.active.clone(), tabs.local_surface)
     };
-    capture(app, window);
+    capture(app, window)?;
     if local_surface {
         content.hide()
     } else {
@@ -374,7 +377,7 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
     let content = app
         .get_webview(label)
         .ok_or("The tab is no longer available.")?;
-    capture(app, window);
+    capture(app, window)?;
     let url = current_url(&content)?;
     let mut closed = None;
     let (index, next, was_active) = {
@@ -458,7 +461,7 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
 // WebKit owns the opaque navigation and document state.
 // Copy bytes on main without exposing them to page scripts.
 // ---------------------------------------------------------
-pub fn capture(app: &AppHandle, owner: &str) {
+pub fn capture(app: &AppHandle, owner: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let labels = app
@@ -484,27 +487,47 @@ pub fn capture(app: &AppHandle, owner: &str) {
             };
             let handle = app.clone();
             let owner = owner.to_string();
-            let _ = content.with_webview(move |platform| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let dispatched = content.with_webview(move |platform| {
                 let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
-                let interaction = unsafe { native.interactionState() }
-                    .and_then(|state| {
-                        state
-                            .downcast_ref::<objc2_foundation::NSData>()
-                            .map(|data| data.to_vec())
-                    })
-                    .unwrap_or_default();
+                let interaction = match unsafe { native.interactionState() } {
+                    Some(state) => match state.downcast_ref::<objc2_foundation::NSData>() {
+                        Some(data) => data.to_vec(),
+                        None => {
+                            let _ = sender
+                                .try_send(Err("Unsupported document state type.".to_string()));
+                            return;
+                        }
+                    },
+                    None => Vec::new(),
+                };
                 let state = handle.state::<Mutex<Windows>>();
-                if let Ok(mut windows) = state.lock()
-                    && let Some(tabs) = windows.entries.get_mut(&owner)
-                    && let Some(tab) = tabs.entries.iter_mut().find(|tab| tab.label == label)
-                {
-                    tab.interaction = interaction;
-                }
+                let result =
+                    state
+                        .lock()
+                        .map_err(|error| error.to_string())
+                        .and_then(|mut windows| {
+                            let tab = windows
+                                .entries
+                                .get_mut(&owner)
+                                .and_then(|tabs| {
+                                    tabs.entries.iter_mut().find(|tab| tab.label == label)
+                                })
+                                .ok_or("The captured tab was closed.")?;
+                            tab.interaction = interaction;
+                            Ok(())
+                        });
+                let _ = sender.try_send(result);
             });
+            dispatched.map_err(|error| error.to_string())?;
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| "Document state capture did not complete.".to_string())??;
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, owner);
+    Ok(())
 }
 
 pub fn restore_document(
@@ -514,17 +537,39 @@ pub fn restore_document(
     #[cfg(target_os = "macos")]
     if !tab.interaction.is_empty() {
         let bytes = tab.interaction.clone();
-        return content
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        content
             .with_webview(move |platform| {
                 let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
                 let data = objc2_foundation::NSData::from_vec(bytes);
                 unsafe {
                     native.setInteractionState(Some(&data));
                 }
+                let _ = sender.try_send(());
             })
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?;
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "Document state restoration did not complete.".to_string())?;
     }
-    content
-        .navigate(tauri::Url::parse(&tab.url).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    if tab.interaction.is_empty() || !cfg!(target_os = "macos") {
+        content
+            .navigate(tauri::Url::parse(&tab.url).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    }
+    let state = content.state::<Mutex<Windows>>();
+    let mut windows = state.lock().map_err(|error| error.to_string())?;
+    let restored = windows
+        .entries
+        .get_mut(content.window().label())
+        .and_then(|tabs| {
+            tabs.entries
+                .iter_mut()
+                .find(|entry| entry.label == content.label())
+        })
+        .ok_or("The restored tab was closed.")?;
+    restored.url = tab.url.clone();
+    restored.title = tab.title.clone();
+    restored.interaction = tab.interaction.clone();
+    Ok(())
 }

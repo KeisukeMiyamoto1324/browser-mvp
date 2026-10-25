@@ -114,10 +114,14 @@ async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), St
         windows
             .entries
             .get_mut(webview.window().label())
-            .and_then(|tabs| tabs.pending_restore.take())
+            .and_then(|tabs| tabs.pending_restore.clone())
     };
     if let Some(session) = restore {
-        return restore_window(&webview.window(), session);
+        let window = webview.window();
+        return on_main(webview.app_handle(), move || {
+            restore_window(&window, session)
+        })
+        .await;
     }
     let address =
         address.unwrap_or_else(|| tauri::Url::parse("about:blank").expect("valid blank URL"));
@@ -266,11 +270,12 @@ async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
 #[tauri::command]
 async fn history_reopen(webview: Webview, index: Option<usize>) -> Result<(), String> {
     browser_content(&webview)?;
-    restore_closed_at(
-        webview.app_handle(),
-        webview.window().label(),
-        index.unwrap_or(0),
-    )
+    let handle = webview.app_handle().clone();
+    let owner = webview.window().label().to_string();
+    on_main(webview.app_handle(), move || {
+        restore_closed_at(&handle, &owner, index.unwrap_or(0))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -328,6 +333,25 @@ async fn history_visible(webview: Webview, visible: bool) -> Result<(), String> 
 }
 
 // ---------------------------------------------------------
+// Await main-thread work before confirming an IPC operation.
+// Enqueueing a native callback does not mean it has completed.
+// ---------------------------------------------------------
+async fn on_main(
+    app: &tauri::AppHandle,
+    action: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    app.run_on_main_thread(move || {
+        let _ = sender.try_send(action());
+    })
+    .map_err(|error| error.to_string())?;
+    receiver
+        .recv()
+        .await
+        .ok_or("The browser closed before the action completed.")?
+}
+
+// ---------------------------------------------------------
 // Restore tab order and selection after the local toolbar mounts.
 // Only validated web addresses and blank tabs can be restored.
 // ---------------------------------------------------------
@@ -335,8 +359,18 @@ fn restore_window(
     window: &tauri::Window,
     session: browser_data::SessionWindow,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _main_thread = objc2_foundation::MainThreadMarker::new()
+        .ok_or("Session restoration must run on the main thread.")?;
     let app = window.app_handle();
-    let bounds = content_bounds(window, 0.0).map_err(|error| error.to_string())?;
+    let bounds = app
+        .state::<Mutex<tabs::Windows>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .entries
+        .get(window.label())
+        .and_then(|tabs| tabs.bounds)
+        .ok_or("The restored tab layout is not ready.")?;
     let mut labels = Vec::new();
     for (index, tab) in session.tabs.iter().enumerate() {
         let Ok(url) = tauri::Url::parse(&tab.url) else {
@@ -368,6 +402,13 @@ fn restore_window(
     if let Some(label) = labels.get(session.active).or_else(|| labels.first()) {
         tabs::select(app, window.label(), label)?;
     }
+    app.state::<Mutex<tabs::Windows>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .entries
+        .get_mut(window.label())
+        .ok_or("The restored window was closed.")?
+        .pending_restore = None;
     browser_data::checkpoint(app);
     Ok(())
 }
@@ -377,6 +418,9 @@ fn restore_closed(app: &tauri::AppHandle, owner: &str) -> Result<(), String> {
 }
 
 fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _main_thread = objc2_foundation::MainThreadMarker::new()
+        .ok_or("Closed tab restoration must run on the main thread.")?;
     let session = app
         .state::<Mutex<browser_data::Store>>()
         .lock()
@@ -416,13 +460,18 @@ fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Resul
         browser_data::checkpoint(app);
     } else {
         let window = create_window(app, None, None)?;
-        app.state::<Mutex<tabs::Windows>>()
-            .lock()
-            .map_err(|error| error.to_string())?
-            .entries
-            .get_mut(window.label())
-            .ok_or("Missing window.")?
-            .pending_restore = Some(session);
+        {
+            let state = app.state::<Mutex<tabs::Windows>>();
+            let mut windows = state.lock().map_err(|error| error.to_string())?;
+            let tabs = windows
+                .entries
+                .get_mut(window.label())
+                .ok_or("Missing window.")?;
+            tabs.toolbar_ready = true;
+            tabs.pending_address = None;
+            tabs.pending_restore = Some(session.clone());
+        }
+        restore_window(&window, session)?;
     }
     let state = app.state::<Mutex<browser_data::Store>>();
     let mut store = state.lock().map_err(|error| error.to_string())?;
@@ -718,7 +767,10 @@ pub fn run() {
                 event,
                 tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }
             ) {
-                tabs::capture(window.app_handle(), window.label());
+                if let Err(error) = tabs::capture(window.app_handle(), window.label()) {
+                    eprintln!("Could not capture window state: {error}");
+                    return;
+                }
                 browser_data::checkpoint(window.app_handle());
             }
             if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -772,10 +824,13 @@ pub fn run() {
                     .lock()
                     .map(|windows| windows.entries.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default();
-                for label in labels {
-                    tabs::capture(app, &label);
+                let captured = labels
+                    .iter()
+                    .try_for_each(|label| tabs::capture(app, label));
+                match captured {
+                    Ok(()) => browser_data::checkpoint(app),
+                    Err(error) => eprintln!("Could not capture exit state: {error}"),
                 }
-                browser_data::checkpoint(app);
                 if let Ok(mut store) = app.state::<Mutex<browser_data::Store>>().lock() {
                     store.quitting = true;
                 }
