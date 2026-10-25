@@ -33,6 +33,29 @@ Local paired captures include the reference address-editing state and applicatio
 
 The reference has additional sidebar, group, page, translation, sharing and new-tab controls plus a favorites bar. These features remain absent and tracked in #3–#7. Address editing still includes the URL scheme, and suggestion panels are not implemented (#4). Light-mode appearance, small-window resizing, exact typography/colors, toolbar overflow, all menu/dialog states, and motion timing still need comparison. Full-screen entry/exit was exercised, but screenshots alone do not prove animation parity. #2 and #10 remain open; there is no visual sign-off.
 
+### Controlled native Zoom fixture (#14)
+
+The fixture now provides `/zoom-narrow`, `/zoom-normal` and `/zoom-wide` with fixed 640, 1024 and 1600 CSS-pixel content widths. Each page can request a separate 700 × 500, 1100 × 760 or 1500 × 900 window and reports live viewport, outer-window and document dimensions plus the display scale. These JavaScript values describe the content context; use native window captures to verify actual outer dimensions. `NAVIGATION_FIXTURE_PORT=18766 node --experimental-strip-types tools/navigation-fixture.ts` runs an isolated fixture alongside the default port.
+
+For a controlled comparison, use a disposable test window in each application, open the same fixture/content and requested window size, and record the actual starting dimensions before invoking the full-screen button's `zoom the window` accessibility action. Capture Zoom and restore, repeat the cycle, and inspect retained input and address accessibility. Requested sizes alone do not establish equal actual sizes because applications can interpret popup chrome differently. Compare narrow, normal and wide content at each starting size. Do not infer a target width from a single content case.
+
+Source inspection of the current application and its Tao 0.37.2 dependency found no `windowWillUseStandardFrame:defaultFrame:` or `windowShouldZoom:toFrame:` override. The toolbar retains the existing native window delegate. Native Zoom therefore has no application policy based on page content; a future sizing implementation must preserve the framework's delegate callbacks and AppKit restore behavior. The old captures remain 2200 × 1520 → 6016 × 3234 for the app and 2360 × 3234 → 2648 × 3234 for the reference. Different starting dimensions still prevent a controlled target-width conclusion.
+
+The next reference attempt was stopped after its active window belonged to the user's existing browsing session and computer-use actions reported a user change. No further input, tab edits or window closes were attempted there. Reference Zoom sizing, transition-time address input (#16) and keyboard window cycling (#18) remain unverified. This fixture preparation does not resolve #14 or establish visual/motion parity; no arbitrary production Zoom width has been added.
+
+On the dedicated debug bundle, the native Zoom accessibility action reproduced maximum available width for all three content widths. The 1024 CSS-pixel page completed two Zoom/restore cycles from a 1100 × 672 content viewport to 3008 × 1529 and back. Its `zoom retained` field value survived; Command-L immediately after the second Zoom restore selected the full current address. JavaScript `outerWidth`/`outerHeight` were both zero in the child WebView, confirming that they cannot measure this application's native frame.
+
+| Fixed content width | Requested window | Initial physical capture | Zoom physical capture | Restored physical capture |
+| --- | --- | --- | --- | --- |
+| 640 CSS px | 700 × 500 | 1400 × 1000 | 6016 × 3234 | 1400 × 1000 |
+| 1600 CSS px | 1500 × 900 | 3000 × 1800 | 6016 × 3234 | 3000 × 1800 |
+
+Local captures are `app-controlled-narrow-700-{initial,zoom,restored}.png` and `app-controlled-wide-1500-{initial,zoom,restored}.png` under `/tmp/browser-interface-review`. The narrow restored capture was visually inspected, including the address controls and content edge. These are application-only captures; no paired reference result was obtained.
+
+The same run repeated Command-grave and Command-tilde with two windows; neither changed the observed active window. Selecting the other native Window-menu entry changed the content viewport from 1500 × 812 to 1100 × 672. A full-screen exit immediately followed by Command-L again left the compact address presentation; a later Command-L selected the full URL. No uninspected address was submitted. These observations reproduce the outstanding shortcut cases but do not identify whether their cause is application, system configuration or automation, and do not establish reference equivalence.
+
+Validation for this fixture/documentation follow-up passed: Biome format/check/lint, TypeScript/Vite build, rustfmt, Clippy with warnings denied, all four existing Rust tests, and dedicated debug app bundling. HTTP checks confirmed all three fixture widths, popup controls and resize reporting; the UI checks above exercised the normal, narrow and wide pages. The dedicated app and isolated fixture were stopped after testing. No production sizing change is included.
+
 ### Review follow-up and size recovery
 
 The automated review of 5933c2e found that repeated Command-L overwrote an active edit and Escape ended editing without focusing content. Repeated Command-L now selects the existing field editor without making it resign first responder. Escape first restores a changed address, then returns focus to content; Tab and Return then activated the first page link without a mouse click. The reference additionally dismisses its suggestions before reverting the draft; that suggestion stage remains pending in #4.
