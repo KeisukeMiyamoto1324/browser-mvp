@@ -44,15 +44,15 @@ pub fn destinations(app: &tauri::AppHandle) -> Vec<Destination> {
                 .flat_map(|(window, tabs)| {
                     tabs.entries
                         .iter()
-                        .map(|tab| (window.clone(), tab.clone()))
+                        .map(|tab| (window.clone(), tab.label.clone(), tab.title.clone()))
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let mut destinations = Vec::new();
-    for (window, tab) in entries {
-        let Some(content) = app.get_webview(&tab.label) else {
+    for (window, label, title) in entries {
+        let Some(content) = app.get_webview(&label) else {
             continue;
         };
         let Ok(url) = crate::tabs::current_url(&content) else {
@@ -62,13 +62,13 @@ pub fn destinations(app: &tauri::AppHandle) -> Vec<Destination> {
             continue;
         }
         destinations.push(Destination {
-            title: if tab.title.is_empty() {
+            title: if title.is_empty() {
                 url.host_str().unwrap_or_default().into()
             } else {
-                tab.title
+                title
             },
             url: url.to_string(),
-            tab: Some(tab.label),
+            tab: Some(label),
             window: Some(window),
         });
     }
@@ -76,13 +76,13 @@ pub fn destinations(app: &tauri::AppHandle) -> Vec<Destination> {
     destinations
 }
 
-pub fn favorites(app: &tauri::AppHandle) -> Vec<Destination> {
+pub fn saved_destinations(app: &tauri::AppHandle, root_only: bool) -> Vec<Destination> {
     crate::saved_pages::snapshot(app)
         .map(|pages| {
             pages
                 .bookmarks
                 .into_iter()
-                .filter(|bookmark| bookmark.parent_id.is_none())
+                .filter(|bookmark| !root_only || bookmark.parent_id.is_none())
                 .filter_map(|bookmark| {
                     bookmark.url.map(|url| Destination {
                         title: bookmark.title,
@@ -142,7 +142,7 @@ pub async fn get_start_page(webview: tauri::Webview) -> Result<StartPage, String
         })
         .map_err(|error| error.to_string())?;
     let mut receiver = receiver;
-    let favorites = favorites(&app);
+    let favorites = saved_destinations(&app, true);
     Ok(StartPage {
         preferences,
         favorites,

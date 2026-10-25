@@ -155,6 +155,11 @@ export default function StartPage(): JSX.Element {
   return (
     <main
       className={`start-page${snapshot.preferences.background ? " start-background" : ""}`}
+      onPointerDown={(event): void => {
+        if (!(event.target as HTMLElement).closest(".start-customize")) {
+          setCustomizing(false);
+        }
+      }}
       onKeyDown={(event): void => {
         if (event.key === "Escape") setCustomizing(false);
       }}

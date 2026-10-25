@@ -137,6 +137,9 @@ define_class!(
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _control: &NSControl, _editor: &NSTextView, command: objc2::runtime::Sel) -> bool {
             let controls = self.ivars();
+            if controls.suggestions.isHidden() && (command == sel!(moveDown:) || command == sel!(moveUp:)) {
+                self.refresh_suggestions();
+            }
             if !controls.suggestions.isHidden() && (command == sel!(moveDown:) || command == sel!(moveUp:)) {
                 let count = controls.destinations.borrow().len();
                 if count == 0 { return false.into(); }
@@ -633,7 +636,10 @@ impl BrowserToolbar {
         let controls = self.ivars();
         let query = controls.address.stringValue().to_string();
         let mut destinations = crate::start_page::destinations(&controls.handle);
-        destinations.extend(crate::start_page::favorites(&controls.handle));
+        destinations.extend(crate::start_page::saved_destinations(
+            &controls.handle,
+            false,
+        ));
         destinations.extend(crate::start_page::recent(&controls.handle, query.trim()));
         let lower = query.trim().to_lowercase();
         let mut seen = std::collections::HashSet::new();
@@ -724,7 +730,7 @@ impl BrowserToolbar {
             controls
                 .address
                 .setStringValue(&NSString::from_str(&destination.url));
-            self.navigate(&controls.address);
+            self.navigate(sel!(navigate:), &controls.address);
             return;
         };
         let result = crate::tabs::select(&controls.handle, &window, &tab).and_then(|()| {
