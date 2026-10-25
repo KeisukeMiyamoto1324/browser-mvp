@@ -141,7 +141,6 @@ button:disabled {
   position: fixed;
   inset: 0;
   z-index: 10;
-  left: var(--sidebar-width, 0px);
   overflow: auto;
   padding: 24px max(32px, calc((100vw - 960px) / 2));
   background: Canvas;
