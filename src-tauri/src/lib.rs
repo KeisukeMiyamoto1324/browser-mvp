@@ -701,6 +701,7 @@ fn create_popup(
             native_toolbar::install(&owner).map_err(|error| error.to_string())?;
             native_popup::install(&popup).map_err(|error| error.to_string())?;
         }
+        let _ = app.emit("tabs-changed", ());
         Ok(popup)
     };
     match build() {
