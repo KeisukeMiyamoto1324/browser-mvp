@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod native_tabs;
+#[cfg(target_os = "macos")]
 mod native_toolbar;
 mod tabs;
 

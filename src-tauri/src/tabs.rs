@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview, WebviewUrl, Window};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Tab {
     pub label: String,
     pub title: String,
@@ -216,7 +216,7 @@ pub fn perform(app: &AppHandle, action: &str) -> Result<(), String> {
         return Ok(());
     }
     let content = active(app).ok_or("The active tab is no longer available.")?;
-    close(app, current_url(&content)?)
+    close_tab(app, content.label())
 }
 
 pub fn current_url(content: &Webview) -> Result<tauri::Url, String> {
@@ -246,9 +246,12 @@ pub fn current_url(content: &Webview) -> Result<tauri::Url, String> {
     content.url().map_err(|error| error.to_string())
 }
 
-fn close(app: &AppHandle, url: tauri::Url) -> Result<(), String> {
-    let content = active(app).ok_or("The active tab is no longer available.")?;
-    let (index, next) = {
+pub fn close_tab(app: &AppHandle, label: &str) -> Result<(), String> {
+    let content = app
+        .get_webview(label)
+        .ok_or("The tab is no longer available.")?;
+    let url = current_url(&content)?;
+    let (index, next, was_active) = {
         let state = app.state::<Mutex<Tabs>>();
         let tabs = state.lock().map_err(|error| error.to_string())?;
         let index = tabs
@@ -265,9 +268,17 @@ fn close(app: &AppHandle, url: tauri::Url) -> Result<(), String> {
                     .and_then(|index| tabs.entries.get(index))
             })
             .map(|tab| tab.label.clone());
-        (index, next)
+        (
+            index,
+            if tabs.active == label {
+                next
+            } else {
+                Some(tabs.active.clone())
+            },
+            tabs.active == label,
+        )
     };
-    if let Some(next) = &next {
+    if was_active && let Some(next) = &next {
         select(app, next)?;
     }
     content.close().map_err(|error| error.to_string())?;

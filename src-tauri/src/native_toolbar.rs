@@ -71,8 +71,7 @@ struct ToolbarControls {
     address_item: Retained<NSToolbarItem>,
     address_width: Retained<NSLayoutConstraint>,
     loading: Cell<Option<bool>>,
-    tabs: Retained<NSSegmentedControl>,
-    tab_labels: RefCell<Vec<String>>,
+    new_tab_item: Retained<NSToolbarItem>,
 }
 
 // ---------------------------------------------------------
@@ -91,13 +90,13 @@ define_class!(
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
         fn default_items(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
             unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier,
-                ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier]) }
+                ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed_items(&self, toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
             let _ = toolbar;
-            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier]) }
+            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
@@ -105,6 +104,7 @@ define_class!(
             match identifier.to_string().as_str() {
                 "history" => Some(self.ivars().history_item.clone()),
                 "address" => Some(self.ivars().address_item.clone()),
+                "new-tab" => Some(self.ivars().new_tab_item.clone()),
                 _ => None,
             }
         }
@@ -162,22 +162,9 @@ define_class!(
             perform(if sender.selectedSegment() == 0 { "back" } else { "forward" });
         }
 
-        #[unsafe(method(selectTab:))]
-        fn select_tab(&self, sender: &NSSegmentedControl) {
-            let label = self.ivars().tab_labels.borrow().get(sender.selectedSegment() as usize).cloned();
-            if let Some(label) = label
-                && let Err(error) = crate::tabs::select(&self.ivars().handle, &label) { eprintln!("Could not select tab: {error}"); }
-        }
-
         #[unsafe(method(newTab:))]
-        fn new_tab(&self, _sender: &NSButton) {
+        fn new_tab(&self, _sender: &NSObject) {
             if let Err(error) = crate::tabs::perform(&self.ivars().handle, "new-tab") { eprintln!("Could not create tab: {error}"); }
-        }
-
-        #[unsafe(method(closeTab:))]
-        fn close_tab(&self, _sender: &NSButton) {
-            let handle = self.ivars().handle.clone();
-            if let Err(error) = crate::tabs::perform(&handle, "close-tab") { eprintln!("Could not close tab: {error}"); }
         }
 
         #[unsafe(method(reloadOrStop:))]
@@ -300,55 +287,18 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     address_item.setLabel(ns_string!("Address and Search"));
     address_item.setAutovalidates(false);
     address_item.setEnabled(true);
-    let tabs = NSSegmentedControl::initWithFrame(
-        NSSegmentedControl::alloc(mtm),
-        NSRect::new(NSPoint::new(8.0, 4.0), NSSize::new(1008.0, 30.0)),
-    );
-    tabs.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-    tabs.setSegmentStyle(NSSegmentStyle::TexturedRounded);
-    tabs.setSelectedSegmentBezelColor(Some(&NSColor::controlBackgroundColor()));
-    tabs.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
-    tabs.setAccessibilityLabel(Some(ns_string!("Tabs")));
-    let strip = NSView::initWithFrame(
-        NSView::alloc(mtm),
-        NSRect::new(NSPoint::ZERO, NSSize::new(1100.0, 38.0)),
-    );
-    strip.addSubview(&tabs);
-    let new_tab = NSButton::initWithFrame(
-        NSButton::alloc(mtm),
-        NSRect::new(NSPoint::new(1058.0, 4.0), NSSize::new(32.0, 30.0)),
-    );
-    new_tab.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-    new_tab.setBordered(false);
-    new_tab.setImage(
+    let new_tab_item =
+        NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), ns_string!("new-tab"));
+    new_tab_item.setLabel(ns_string!("New Tab"));
+    new_tab_item.setImage(
         NSImage::imageWithSystemSymbolName_accessibilityDescription(
             ns_string!("plus"),
             Some(ns_string!("New Tab")),
         )
         .as_deref(),
     );
-    new_tab.setAccessibilityLabel(Some(ns_string!("New Tab")));
-    strip.addSubview(&new_tab);
-    let close_tab = NSButton::initWithFrame(
-        NSButton::alloc(mtm),
-        NSRect::new(NSPoint::new(1022.0, 4.0), NSSize::new(32.0, 30.0)),
-    );
-    close_tab.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
-    close_tab.setBordered(false);
-    close_tab.setImage(
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            ns_string!("xmark"),
-            Some(ns_string!("Close Tab")),
-        )
-        .as_deref(),
-    );
-    close_tab.setAccessibilityLabel(Some(ns_string!("Close Tab")));
-    strip.addSubview(&close_tab);
-    let accessory = NSTitlebarAccessoryViewController::new(mtm);
-    accessory.setView(&strip);
-    accessory.setLayoutAttribute(NSLayoutAttribute::Bottom);
-    accessory.setFullScreenMinHeight(38.0);
-    native.addTitlebarAccessoryViewController(&accessory);
+    new_tab_item.setAutovalidates(false);
+    new_tab_item.setEnabled(true);
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
         window: native.clone(),
         handle: window.app_handle().clone(),
@@ -360,18 +310,13 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
         address_item,
         address_width,
         loading: Cell::new(None),
-        tabs,
-        tab_labels: RefCell::new(Vec::new()),
+        new_tab_item,
     });
     let delegate: Retained<BrowserToolbar> = unsafe { msg_send![super(delegate), init] };
     let controls = delegate.ivars();
     unsafe {
-        controls.tabs.setTarget(Some(&delegate));
-        controls.tabs.setAction(Some(sel!(selectTab:)));
-        new_tab.setTarget(Some(&delegate));
-        new_tab.setAction(Some(sel!(newTab:)));
-        close_tab.setTarget(Some(&delegate));
-        close_tab.setAction(Some(sel!(closeTab:)));
+        controls.new_tab_item.setTarget(Some(&delegate));
+        controls.new_tab_item.setAction(Some(sel!(newTab:)));
         controls.address.setTarget(Some(&delegate));
         controls.address.setAction(Some(sel!(navigate:)));
         controls
@@ -395,6 +340,7 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     TOOLBAR.with(|slot| {
         *slot.borrow_mut() = Some(delegate);
     });
+    crate::native_tabs::install(window)?;
     Ok(())
 }
 
@@ -471,6 +417,7 @@ pub fn update(state: &NavigationState) {
 }
 
 pub fn remove() {
+    crate::native_tabs::remove();
     TOOLBAR.with(|slot| {
         slot.borrow_mut().take();
     });
@@ -559,39 +506,5 @@ pub fn tab_changed(app: &tauri::AppHandle) {
 }
 
 pub fn update_tabs(app: &tauri::AppHandle) {
-    let (entries, active) = {
-        let state = app.state::<std::sync::Mutex<crate::tabs::Tabs>>();
-        let Ok(tabs) = state.lock() else {
-            return;
-        };
-        (tabs.entries.clone(), tabs.active.clone())
-    };
-    TOOLBAR.with(|slot| {
-        let borrowed = slot.borrow();
-        let Some(toolbar) = borrowed.as_ref() else {
-            return;
-        };
-        let controls = toolbar.ivars();
-        controls.tabs.setSegmentCount(entries.len() as isize);
-        let width =
-            ((controls.window.frame().size.width - 92.0) / entries.len().max(1) as f64).max(40.0);
-        for (index, tab) in entries.iter().enumerate() {
-            let title = if tab.title.is_empty() {
-                "New Tab"
-            } else {
-                &tab.title
-            };
-            controls
-                .tabs
-                .setLabel_forSegment(&NSString::from_str(title), index as isize);
-            controls.tabs.setWidth_forSegment(width, index as isize);
-            controls
-                .tabs
-                .setSelected_forSegment(tab.label == active, index as isize);
-            controls
-                .tabs
-                .setToolTip_forSegment(Some(&NSString::from_str(title)), index as isize);
-        }
-        *controls.tab_labels.borrow_mut() = entries.into_iter().map(|tab| tab.label).collect();
-    });
+    crate::native_tabs::update(app);
 }
