@@ -342,9 +342,14 @@ pub fn run() {
                 has_visible_windows: false,
                 ..
             } = &event
-                && let Err(error) = tabs::perform(app, "new-tab")
             {
-                eprintln!("Could not reopen window: {error}");
+                if let Some(window) = app.get_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                } else if let Err(error) = tabs::perform(app, "new-tab") {
+                    eprintln!("Could not reopen window: {error}");
+                }
             }
             // ---------------------------------------------------------
             // Handle macOS URL-open events during launch and normal use.
