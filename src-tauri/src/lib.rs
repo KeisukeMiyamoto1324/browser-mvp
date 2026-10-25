@@ -6,13 +6,14 @@ mod saved_pages;
 mod tabs;
 
 use std::sync::Mutex;
-use tauri::{LogicalPosition, LogicalSize, Manager, Webview};
+use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Webview};
 
 const TOOLBAR_HEIGHT: f64 = if cfg!(target_os = "macos") { 0.0 } else { 64.0 };
 
 #[cfg(target_os = "macos")]
 struct BrowserMenu {
     stop: tauri::menu::MenuItem<tauri::Wry>,
+    sidebar: Vec<tauri::menu::MenuItem<tauri::Wry>>,
 }
 
 // ---------------------------------------------------------
@@ -32,9 +33,24 @@ fn content_bounds(window: &tauri::Window, viewport_height: f64) -> tauri::Result
     if cfg!(target_os = "macos") && viewport_height > 0.0 {
         top += (size.height - viewport_height).max(0.0);
     }
+    let sidebar_width = window
+        .state::<Mutex<tabs::Windows>>()
+        .lock()
+        .ok()
+        .and_then(|windows| {
+            windows
+                .entries
+                .get(window.label())
+                .map(|tabs| tabs.sidebar_width)
+        })
+        .unwrap_or(0.0);
     Ok(tauri::Rect {
-        position: LogicalPosition::new(0.0, top).into(),
-        size: LogicalSize::new(size.width, (size.height - top).max(1.0)).into(),
+        position: LogicalPosition::new(sidebar_width, top).into(),
+        size: LogicalSize::new(
+            (size.width - sidebar_width).max(1.0),
+            (size.height - top).max(1.0),
+        )
+        .into(),
     })
 }
 
@@ -87,8 +103,28 @@ fn browser_content(toolbar: &Webview) -> Result<Webview, String> {
 }
 
 #[tauri::command]
-async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), String> {
+async fn resize_content(
+    webview: Webview,
+    viewport_height: f64,
+    sidebar_width: Option<f64>,
+) -> Result<(), String> {
     let content = browser_content(&webview)?;
+    if let Some(width) = sidebar_width {
+        if !width.is_finite() {
+            return Err("Invalid sidebar width.".into());
+        }
+        let state = webview.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(webview.window().label())
+            .ok_or("Unknown window.")?;
+        tabs.sidebar_width = if width > 0.0 {
+            width.clamp(220.0, 480.0)
+        } else {
+            0.0
+        };
+    }
     let bounds = content_bounds(&webview.window(), viewport_height).map_err(|e| e.to_string())?;
     tabs::resize(webview.app_handle(), webview.window().label(), bounds)?;
     // ---------------------------------------------------------
@@ -317,6 +353,20 @@ fn create_window(
     Ok(window)
 }
 
+pub(crate) fn sidebar_action(app: &tauri::AppHandle, owner: &str, action: &str) {
+    let local = app
+        .state::<Mutex<tabs::Windows>>()
+        .lock()
+        .is_ok_and(|windows| windows.owns_toolbar(owner, owner));
+    if !local {
+        return;
+    }
+    if let Some(view) = app.get_webview(owner) {
+        let _ = view.emit("sidebar-action", action);
+        let _ = view.set_focus();
+    }
+}
+
 fn focused_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
     let label = {
         let state = app.state::<Mutex<tabs::Windows>>();
@@ -340,6 +390,10 @@ pub fn run() {
         .manage(Mutex::new(tabs::Windows::default()))
         .menu(|app| {
             let menu = tauri::menu::Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            let mut sidebar_items = Vec::new();
+            #[cfg(target_os = "macos")]
+            let mut stop_item = None;
             #[cfg(target_os = "macos")]
             for item in menu.items()? {
                 let Some(submenu) = item.as_submenu() else {
@@ -376,16 +430,21 @@ pub fn run() {
                     }
                     "View" => {
                         for (id, label, shortcut) in [
+                            ("toggle-sidebar", "Show Sidebar", "CmdOrCtrl+Shift+L"),
                             ("next-tab", "Show Next Tab", "Ctrl+Tab"),
                             ("previous-tab", "Show Previous Tab", "Ctrl+Shift+Tab"),
                         ] {
-                            submenu.append(&tauri::menu::MenuItem::with_id(
+                            let item = tauri::menu::MenuItem::with_id(
                                 app,
                                 id,
                                 label,
                                 true,
                                 Some(shortcut),
-                            )?)?;
+                            )?;
+                            if id == "toggle-sidebar" {
+                                sidebar_items.push(item.clone());
+                            }
+                            submenu.append(&item)?;
                         }
                         submenu.prepend(&tauri::menu::MenuItem::with_id(
                             app,
@@ -402,9 +461,31 @@ pub fn run() {
                             Some("CmdOrCtrl+."),
                         )?;
                         submenu.prepend(&stop)?;
-                        app.manage(BrowserMenu { stop });
+                        stop_item = Some(stop);
                     }
                     _ => {}
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let bookmarks = tauri::menu::Submenu::new(app, "Bookmarks", true)?;
+                for (id, label, shortcut) in [
+                    ("show-bookmarks", "Show Bookmarks", "CmdOrCtrl+Alt+B"),
+                    ("show-reading-list", "Show Reading List", "CmdOrCtrl+Ctrl+2"),
+                    ("add-bookmark", "Add Bookmark…", "CmdOrCtrl+D"),
+                    ("add-reading", "Add to Reading List", "CmdOrCtrl+Shift+D"),
+                ] {
+                    let item =
+                        tauri::menu::MenuItem::with_id(app, id, label, true, Some(shortcut))?;
+                    sidebar_items.push(item.clone());
+                    bookmarks.append(&item)?;
+                }
+                menu.insert(&bookmarks, 4.min(menu.items()?.len()))?;
+                if let Some(stop) = stop_item {
+                    app.manage(BrowserMenu {
+                        stop,
+                        sidebar: sidebar_items,
+                    });
                 }
             }
             Ok(menu)
@@ -435,6 +516,17 @@ pub fn run() {
                 if let Err(error) = tabs::perform(app, owner, action) {
                     eprintln!("Tab action failed: {error}");
                 }
+                return;
+            }
+            if matches!(
+                action,
+                "toggle-sidebar"
+                    | "show-bookmarks"
+                    | "show-reading-list"
+                    | "add-bookmark"
+                    | "add-reading"
+            ) {
+                sidebar_action(app, owner, action);
                 return;
             }
             #[cfg(target_os = "macos")]

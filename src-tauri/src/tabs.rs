@@ -13,6 +13,7 @@ pub struct Tabs {
     pub entries: Vec<Tab>,
     pub active: String,
     pub toolbar_ready: bool,
+    pub sidebar_width: f64,
     pub pending_address: Option<tauri::Url>,
     pub(crate) next_id: u64,
     pub(crate) bounds: Option<tauri::Rect>,

@@ -74,6 +74,7 @@ struct ToolbarControls {
     address_width: Retained<NSLayoutConstraint>,
     loading: Cell<Option<bool>>,
     new_tab_item: Retained<NSToolbarItem>,
+    sidebar_item: Retained<NSToolbarItem>,
 }
 
 // ---------------------------------------------------------
@@ -91,19 +92,20 @@ define_class!(
     unsafe impl NSToolbarDelegate for BrowserToolbar {
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
         fn default_items(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
-            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier,
+            unsafe { NSArray::from_slice(&[ns_string!("sidebar"), ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier,
                 ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed_items(&self, toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
             let _ = toolbar;
-            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
+            unsafe { NSArray::from_slice(&[ns_string!("sidebar"), ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
         fn item(&self, _toolbar: &NSToolbar, identifier: &NSString, _inserted: bool) -> Option<Retained<NSToolbarItem>> {
             match identifier.to_string().as_str() {
+                "sidebar" => Some(self.ivars().sidebar_item.clone()),
                 "history" => Some(self.ivars().history_item.clone()),
                 "address" => Some(self.ivars().address_item.clone()),
                 "new-tab" => Some(self.ivars().new_tab_item.clone()),
@@ -162,6 +164,11 @@ define_class!(
         #[unsafe(method(navigateHistory:))]
         fn navigate_history(&self, sender: &NSSegmentedControl) {
             perform(&self.ivars().window_label, if sender.selectedSegment() == 0 { "back" } else { "forward" });
+        }
+
+        #[unsafe(method(toggleSidebar:))]
+        fn toggle_sidebar(&self, _sender: &NSObject) {
+            crate::sidebar_action(&self.ivars().handle, &self.ivars().window_label, "toggle-sidebar");
         }
 
         #[unsafe(method(newTab:))]
@@ -301,6 +308,23 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     );
     new_tab_item.setAutovalidates(false);
     new_tab_item.setEnabled(true);
+    let sidebar_item =
+        NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), ns_string!("sidebar"));
+    sidebar_item.setLabel(ns_string!("Show Sidebar"));
+    sidebar_item.setImage(
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("sidebar.left"),
+            Some(ns_string!("Show Sidebar")),
+        )
+        .as_deref(),
+    );
+    sidebar_item.setAutovalidates(false);
+    sidebar_item.setEnabled(
+        window
+            .state::<std::sync::Mutex<crate::tabs::Windows>>()
+            .lock()
+            .is_ok_and(|windows| windows.owns_toolbar(window.label(), window.label())),
+    );
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
         window: native.clone(),
         handle: window.app_handle().clone(),
@@ -314,10 +338,13 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
         address_width,
         loading: Cell::new(None),
         new_tab_item,
+        sidebar_item,
     });
     let delegate: Retained<BrowserToolbar> = unsafe { msg_send![super(delegate), init] };
     let controls = delegate.ivars();
     unsafe {
+        controls.sidebar_item.setTarget(Some(&delegate));
+        controls.sidebar_item.setAction(Some(sel!(toggleSidebar:)));
         controls.new_tab_item.setTarget(Some(&delegate));
         controls.new_tab_item.setAction(Some(sel!(newTab:)));
         controls.address.setTarget(Some(&delegate));
@@ -436,6 +463,32 @@ pub fn sync_menu(window_label: &str) {
         };
         let controls = toolbar.ivars();
         if let Some(menu) = controls.handle.try_state::<crate::BrowserMenu>() {
+            let (local, sidebar_open) = controls
+                .handle
+                .state::<std::sync::Mutex<crate::tabs::Windows>>()
+                .lock()
+                .map(|windows| {
+                    (
+                        windows.owns_toolbar(window_label, window_label),
+                        windows
+                            .entries
+                            .get(window_label)
+                            .is_some_and(|tabs| tabs.sidebar_width > 0.0),
+                    )
+                })
+                .unwrap_or_default();
+            let label = if sidebar_open {
+                ns_string!("Hide Sidebar")
+            } else {
+                ns_string!("Show Sidebar")
+            };
+            controls.sidebar_item.setLabel(label);
+            for item in &menu.sidebar {
+                let _ = item.set_enabled(local);
+                if item.id().as_ref() == "toggle-sidebar" {
+                    let _ = item.set_text(label.to_string());
+                }
+            }
             let _ = menu
                 .stop
                 .set_enabled(controls.loading.get().unwrap_or(false));
@@ -454,6 +507,9 @@ pub fn remove(window_label: &str) {
         && let Some(menu) = toolbar.ivars().handle.try_state::<crate::BrowserMenu>()
     {
         let _ = menu.stop.set_enabled(false);
+        for item in &menu.sidebar {
+            let _ = item.set_enabled(false);
+        }
     }
 }
 
