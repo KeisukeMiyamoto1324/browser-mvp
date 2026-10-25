@@ -41,6 +41,7 @@ pub fn destinations(app: &tauri::AppHandle) -> Vec<Destination> {
             windows
                 .entries
                 .iter()
+                .filter(|(_, tabs)| tabs.persistent)
                 .flat_map(|(window, tabs)| {
                     tabs.entries
                         .iter()

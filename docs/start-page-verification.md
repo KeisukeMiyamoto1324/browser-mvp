@@ -1,6 +1,6 @@
 # Start page and address suggestions
 
-Scope: issue #4. The local start page appears for blank tabs and windows. Its search field opens the owning remote tab. Favorites use the saved-page library from issue #5, and Recently Visited uses this application's history store from issue #6. No browsing records are imported from other applications.
+Scope: issue #4. The local start page appears for blank tabs and windows. Its search field opens the owning remote tab. Favorites use the saved-page library from issue #5, and Recently Visited uses this application's history store from issue #6. No browsing records are imported from other applications. Open Tabs excludes windows marked as nonpersistent; this is also the contract for address-tab candidates.
 
 The start page supports adding favorites, switching to existing open tabs, hiding Favorites or Recently Visited, and an optional generated color background. Section and background settings persist in the application data directory. Website tiles use text initials; they do not load icons from external servers.
 
