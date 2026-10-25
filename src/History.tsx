@@ -24,10 +24,23 @@ export default function History(): JSX.Element | null {
   const [error, setError] = useState("");
 
   useEffect((): (() => void) => {
+    let active = true;
     const subscription = listen("show-history", (): void => {
       setVisible(true);
+      void invoke("history_requested").catch((cause: unknown): void => {
+        if (active) setError(String(cause));
+      });
     });
+    void subscription
+      .then((): Promise<boolean> => invoke<boolean>("history_requested"))
+      .then((requested: boolean): void => {
+        if (active && requested) setVisible(true);
+      })
+      .catch((cause: unknown): void => {
+        if (active) setError(String(cause));
+      });
     return (): void => {
+      active = false;
       void subscription.then((unlisten): void => {
         unlisten();
       });

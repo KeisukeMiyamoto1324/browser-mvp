@@ -18,6 +18,8 @@ pub struct Tabs {
     pub entries: Vec<Tab>,
     pub active: String,
     pub toolbar_ready: bool,
+    pub local_toolbar: bool,
+    pub pending_history: bool,
     pub pending_address: Option<tauri::Url>,
     pub(crate) next_id: u64,
     pub(crate) bounds: Option<tauri::Rect>,
@@ -33,6 +35,8 @@ impl Default for Tabs {
             entries: Vec::new(),
             active: String::new(),
             toolbar_ready: false,
+            local_toolbar: false,
+            pending_history: false,
             pending_address: None,
             next_id: 0,
             bounds: None,
@@ -64,7 +68,11 @@ pub struct Windows {
 
 impl Windows {
     pub fn owns_toolbar(&self, label: &str, window: &str) -> bool {
-        label == window && self.entries.contains_key(window)
+        label == window
+            && self
+                .entries
+                .get(window)
+                .is_some_and(|tabs| tabs.local_toolbar)
     }
 }
 
@@ -121,56 +129,8 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
         tabs.next_id += 1;
         format!("content-{}-{}", window.label(), tabs.next_id)
     };
-    let handle = app.clone();
-    let owner = window.label().to_string();
     let initial_url = url.to_string();
-    let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
-        .focused(false)
-        .on_navigation(|url| url.as_str() == "about:blank" || crate::is_web_address(url))
-        .on_page_load(page_loaded)
-        .on_document_title_changed(|view, title| {
-            let address = current_url(&view).ok();
-            let state = view.state::<Mutex<Windows>>();
-            if let Ok(mut windows) = state.lock()
-                && let Some(tabs) = windows.entries.get_mut(view.window().label())
-                && let Some(tab) = tabs
-                    .entries
-                    .iter_mut()
-                    .find(|tab| tab.label == view.label())
-            {
-                tab.title = title.clone();
-                if let Some(address) = address {
-                    tab.url = address.to_string();
-                }
-                if tabs.persistent {
-                    let state = view.state::<Mutex<crate::browser_data::Store>>();
-                    if let Ok(mut store) = state.lock()
-                        && let Some(visit) = store
-                            .data
-                            .visits
-                            .iter_mut()
-                            .rev()
-                            .find(|visit| visit.url == tab.url)
-                    {
-                        visit.title = title;
-                    }
-                }
-            }
-            let _ = view.app_handle().emit("tabs-changed", ());
-        })
-        .on_new_window(move |url, features| {
-            if crate::is_web_address(&url) {
-                let result = if features.size().is_some() || features.position().is_some() {
-                    crate::create_window(&handle, Some(url), Some(features)).map(|_| ())
-                } else {
-                    open(&handle, &owner, url).map(|_| ())
-                };
-                if let Err(error) = result {
-                    eprintln!("Could not open web address: {error}");
-                }
-            }
-            tauri::webview::NewWindowResponse::Deny
-        });
+    let builder = content_builder(app, &label, url).focused(false);
     let content = window
         .add_child(builder, bounds.position, bounds.size)
         .map_err(|error| error.to_string())?;
@@ -247,6 +207,80 @@ pub fn page_loaded(view: Webview, payload: tauri::webview::PageLoadPayload<'_>) 
         crate::browser_data::checkpoint(view.app_handle());
         let _ = view.app_handle().emit("history-changed", ());
     }
+}
+
+// ---------------------------------------------------------
+// Return WebKit's requested view to preserve its WindowProxy.
+// Remote popup views never host the privileged toolbar page.
+// ---------------------------------------------------------
+pub(crate) fn content_builder(
+    app: &AppHandle,
+    label: &str,
+    url: tauri::Url,
+) -> tauri::webview::WebviewBuilder<tauri::Wry> {
+    let handle = app.clone();
+    let opener = label.to_string();
+    tauri::webview::WebviewBuilder::new(label, WebviewUrl::External(url))
+        .on_navigation(allowed_destination)
+        .on_page_load(page_loaded)
+        .on_document_title_changed(update_title)
+        .on_new_window(move |url, features| requested_window(&handle, &opener, url, features))
+}
+
+pub(crate) fn update_title(view: Webview, title: String) {
+    let address = current_url(&view).ok();
+    let state = view.state::<Mutex<Windows>>();
+    if let Ok(mut windows) = state.lock()
+        && let Some(tabs) = windows.entries.get_mut(view.window().label())
+        && let Some(tab) = tabs
+            .entries
+            .iter_mut()
+            .find(|tab| tab.label == view.label())
+    {
+        tab.title = title.clone();
+        if let Some(address) = address {
+            tab.url = address.to_string();
+        }
+        if tabs.persistent {
+            let state = view.state::<Mutex<crate::browser_data::Store>>();
+            if let Ok(mut store) = state.lock()
+                && let Some(visit) = store
+                    .data
+                    .visits
+                    .iter_mut()
+                    .rev()
+                    .find(|visit| visit.url == tab.url)
+            {
+                visit.title = title;
+            }
+        }
+    }
+    let _ = view.app_handle().emit("tabs-changed", ());
+}
+
+pub(crate) fn requested_window(
+    app: &AppHandle,
+    opener: &str,
+    url: tauri::Url,
+    features: tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    if !allowed_destination(&url) {
+        return tauri::webview::NewWindowResponse::Deny;
+    }
+    let Some(source) = app.get_webview(opener) else {
+        return tauri::webview::NewWindowResponse::Deny;
+    };
+    match crate::create_popup(app, source.window().label(), features) {
+        Ok(window) => tauri::webview::NewWindowResponse::Create { window },
+        Err(error) => {
+            eprintln!("Could not create requested window: {error}");
+            tauri::webview::NewWindowResponse::Deny
+        }
+    }
+}
+
+pub(crate) fn allowed_destination(url: &tauri::Url) -> bool {
+    url.as_str() == "about:blank" || crate::is_web_address(url)
 }
 
 pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> {
