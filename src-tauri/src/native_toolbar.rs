@@ -634,6 +634,7 @@ impl BrowserToolbar {
         let query = controls.address.stringValue().to_string();
         let mut destinations = crate::start_page::destinations(&controls.handle);
         destinations.extend(crate::start_page::favorites(&controls.handle));
+        destinations.extend(crate::start_page::recent(&controls.handle, query.trim()));
         let lower = query.trim().to_lowercase();
         let mut seen = std::collections::HashSet::new();
         destinations.retain(|entry| {
@@ -656,6 +657,9 @@ impl BrowserToolbar {
         let Some(root) = controls.window.contentView() else {
             return;
         };
+        let layout = controls.window.contentLayoutRect();
+        let capacity = ((layout.size.height - 16.0) / 44.0).floor().max(1.0) as usize;
+        destinations.truncate(capacity);
         let count = destinations.len();
         controls.selection.set(None);
         if count == 0 {
@@ -665,7 +669,6 @@ impl BrowserToolbar {
         }
         let width = (controls.address_width.constant() + 80.0).min(root.bounds().size.width - 24.0);
         let height = count as f64 * 44.0 + 16.0;
-        let layout = controls.window.contentLayoutRect();
         let top = if root.isFlipped() {
             root.bounds().size.height - layout.size.height
         } else {

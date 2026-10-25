@@ -274,6 +274,7 @@ button:disabled {
 
 .start-page {
   position: relative;
+  margin-left: var(--sidebar-width, 0px);
   height: 100dvh;
   overflow: auto;
   background: #f8f8fa;

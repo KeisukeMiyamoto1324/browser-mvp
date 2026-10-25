@@ -18,8 +18,8 @@ type Destination = {
 type Snapshot = {
   preferences: Preferences;
   openTabs: Destination[];
-  favorites?: Destination[];
-  recent?: Destination[];
+  favorites: Destination[];
+  recent: Destination[];
 };
 
 // ---------------------------------------------------------
@@ -30,6 +30,8 @@ export default function StartPage(): JSX.Element {
   const [snapshot, setSnapshot] = useState<Snapshot>({
     preferences: { hideFavorites: false, hideRecent: false, background: false },
     openTabs: [],
+    favorites: [],
+    recent: [],
   });
   const [customizing, setCustomizing] = useState(false);
   const favoriteDialog = useRef<HTMLDialogElement>(null);
@@ -47,12 +49,15 @@ export default function StartPage(): JSX.Element {
         });
     }
     refresh();
+    window.addEventListener("focus", refresh);
     const subscriptions = [
       listen("saved-pages-changed", refresh),
       listen("start-page-changed", refresh),
+      listen("history-changed", refresh),
     ];
     return (): void => {
       active = false;
+      window.removeEventListener("focus", refresh);
       for (const subscription of subscriptions) {
         void subscription
           .then((unlisten): void => {

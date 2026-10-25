@@ -266,7 +266,10 @@ async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
     browser_content(&webview)?;
     let state = webview.state::<Mutex<browser_data::Store>>();
     let mut store = state.lock().map_err(|error| error.to_string())?;
-    store.clear_history(since)
+    store.clear_history(since)?;
+    drop(store);
+    let _ = webview.app_handle().emit("history-changed", ());
+    Ok(())
 }
 
 #[tauri::command]

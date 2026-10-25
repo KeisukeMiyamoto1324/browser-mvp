@@ -26,6 +26,7 @@ pub struct StartPage {
     preferences: Preferences,
     open_tabs: Vec<Destination>,
     favorites: Vec<Destination>,
+    recent: Vec<Destination>,
 }
 
 // ---------------------------------------------------------
@@ -95,6 +96,33 @@ pub fn favorites(app: &tauri::AppHandle) -> Vec<Destination> {
         .unwrap_or_default()
 }
 
+// ---------------------------------------------------------
+// Show each recent destination once, keeping its newest visit.
+// History and saved-page storage remain shared with their views.
+// ---------------------------------------------------------
+pub fn recent(app: &tauri::AppHandle, query: &str) -> Vec<Destination> {
+    let visits = app
+        .state::<Mutex<crate::browser_data::Store>>()
+        .lock()
+        .map(|store| store.query(query))
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    visits
+        .into_iter()
+        .filter(|visit| seen.insert(visit.url.clone()))
+        .map(|visit| Destination {
+            title: if visit.title.is_empty() {
+                visit.url.clone()
+            } else {
+                visit.title
+            },
+            url: visit.url,
+            tab: None,
+            window: None,
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn get_start_page(webview: tauri::Webview) -> Result<StartPage, String> {
     crate::browser_content(&webview)?;
@@ -118,6 +146,7 @@ pub async fn get_start_page(webview: tauri::Webview) -> Result<StartPage, String
     Ok(StartPage {
         preferences,
         favorites,
+        recent: recent(&app, "").into_iter().take(12).collect(),
         open_tabs: receiver.recv().await.unwrap_or_default(),
     })
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, Webview, WebviewUrl, Window};
+use tauri::{AppHandle, Emitter, Manager, Webview, WebviewUrl, Window};
 
 #[derive(Clone, PartialEq)]
 pub struct Tab {
@@ -228,6 +228,7 @@ pub fn page_loaded(view: Webview, payload: tauri::webview::PageLoadPayload<'_>) 
             return;
         }
         crate::browser_data::checkpoint(view.app_handle());
+        let _ = view.app_handle().emit("history-changed", ());
     }
 }
 
