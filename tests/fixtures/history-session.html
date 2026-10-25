@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>History Session Fixture</title>
+  <style>
+    body { max-width: 760px; margin: 32px auto; font: 18px system-ui; }
+    nav, form { display: grid; gap: 16px; padding: 24px; border: 1px solid #999; }
+    input, textarea, select { font: inherit; }
+    section { min-height: 1200px; padding-top: 32px; border-top: 1px solid #999; }
+  </style>
+</head>
+<body>
+  <h1>History Session Fixture</h1>
+  <nav aria-label="Test pages">
+    <a href="?page=first">First page</a>
+    <a href="?page=second">Second page</a>
+    <a href="?page=third">Third page</a>
+    <a href="#middle">Scroll to middle</a>
+  </nav>
+  <form>
+    <label>Test text <input name="note" autocomplete="off" placeholder="Use sample text only"></label>
+    <label>Test message <textarea name="message" autocomplete="off"></textarea></label>
+    <label><input type="checkbox" name="checked">Test checkbox</label>
+    <label>Test choice <select name="choice"><option>First</option><option>Second</option></select></label>
+  </form>
+  <section><h2>Upper section</h2><p>Fill the form above, then scroll down.</p></section>
+  <section id="middle"><h2>Middle section</h2><p>Use this visible marker to check scroll restoration.</p></section>
+  <section id="lower"><h2>Lower section</h2><p>This is the final scroll marker.</p></section>
+</body>
+</html>

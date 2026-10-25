@@ -136,3 +136,138 @@ button:disabled {
     transition: none;
   }
 }
+
+.history-page {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  overflow: auto;
+  padding: 24px max(32px, calc((100vw - 960px) / 2));
+  background: Canvas;
+  color: CanvasText;
+  animation: history-appear 150ms ease-out;
+}
+.history-page header,
+.history-controls,
+.history-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.history-page h1 {
+  font-size: 26px;
+  font-weight: 600;
+}
+.history-page h2 {
+  font-size: 14px;
+  margin: 26px 0 8px;
+}
+.history-controls input {
+  max-width: 340px;
+}
+.history-page button {
+  display: block;
+  flex: none;
+  white-space: nowrap;
+  font: inherit;
+}
+.history-page aside {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 20px;
+  font-size: 13px;
+}
+.history-page aside span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0.65;
+}
+.history-page .history-entry {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  text-align: left;
+  width: 100%;
+  height: auto;
+  padding: 10px;
+  border-radius: 5px;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+}
+.history-entry time {
+  min-width: 74px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+.history-page .history-entry span {
+  min-width: 0;
+}
+.history-entry strong,
+.history-entry small {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.history-entry strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.history-entry small {
+  margin-top: 3px;
+  font-size: 11px;
+  opacity: 0.6;
+}
+.history-empty {
+  text-align: center;
+  margin-top: 100px;
+  opacity: 0.5;
+}
+.history-scrim {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #0005;
+}
+.history-dialog {
+  width: min(420px, 90vw);
+  padding: 24px;
+  background: Canvas;
+  color: CanvasText;
+  border-radius: 14px;
+  box-shadow: 0 12px 60px #0004;
+}
+.history-dialog h2 {
+  margin-top: 0;
+  font-size: 18px;
+}
+.history-dialog p {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.history-dialog select {
+  margin-left: 10px;
+  font: inherit;
+}
+.history-dialog footer {
+  justify-content: end;
+  margin-top: 24px;
+}
+@keyframes history-appear {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .history-page {
+    animation: none;
+  }
+}
