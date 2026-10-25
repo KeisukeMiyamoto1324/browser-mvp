@@ -111,37 +111,7 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
     let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
         .focused(false)
         .on_navigation(|url| url.as_str() == "about:blank" || crate::is_web_address(url))
-        .on_page_load(|view, payload| {
-            if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                return;
-            }
-            let persistent = {
-                let state = view.state::<Mutex<Windows>>();
-                let Ok(mut windows) = state.lock() else {
-                    return;
-                };
-                let Some(tabs) = windows.entries.get_mut(view.window().label()) else {
-                    return;
-                };
-                let Some(tab) = tabs
-                    .entries
-                    .iter_mut()
-                    .find(|tab| tab.label == view.label())
-                else {
-                    return;
-                };
-                tab.url = payload.url().to_string();
-                (tabs.persistent, tab.title.clone())
-            };
-            if persistent.0 {
-                let state = view.state::<Mutex<crate::browser_data::Store>>();
-                if let Ok(mut store) = state.lock() {
-                    store.record(payload.url().as_str(), &persistent.1);
-                }
-                capture(view.app_handle(), view.window().label());
-                crate::browser_data::checkpoint(view.app_handle());
-            }
-        })
+        .on_page_load(page_loaded)
         .on_document_title_changed(|view, title| {
             let address = current_url(&view).ok();
             let state = view.state::<Mutex<Windows>>();
@@ -218,6 +188,42 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
         });
     }
     select(app, window.label(), &label)
+}
+
+// ---------------------------------------------------------
+// Share committed history recording with content and popups.
+// Privacy follows the owning window rather than its UI role.
+// ---------------------------------------------------------
+pub fn page_loaded(view: Webview, payload: tauri::webview::PageLoadPayload<'_>) {
+    if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+        return;
+    }
+    let persistent = {
+        let state = view.state::<Mutex<Windows>>();
+        let Ok(mut windows) = state.lock() else {
+            return;
+        };
+        let Some(tabs) = windows.entries.get_mut(view.window().label()) else {
+            return;
+        };
+        let Some(tab) = tabs
+            .entries
+            .iter_mut()
+            .find(|tab| tab.label == view.label())
+        else {
+            return;
+        };
+        tab.url = payload.url().to_string();
+        (tabs.persistent, tab.title.clone())
+    };
+    if persistent.0 {
+        let state = view.state::<Mutex<crate::browser_data::Store>>();
+        if let Ok(mut store) = state.lock() {
+            store.record(payload.url().as_str(), &persistent.1);
+        }
+        capture(view.app_handle(), view.window().label());
+        crate::browser_data::checkpoint(view.app_handle());
+    }
 }
 
 pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> {
