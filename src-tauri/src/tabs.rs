@@ -40,6 +40,20 @@ impl Default for Tabs {
     }
 }
 
+// ---------------------------------------------------------
+// Consume focus only once the requested child can receive it.
+// A local overlay or blank placeholder must keep its focus.
+// ---------------------------------------------------------
+impl Tabs {
+    pub fn take_focus(&mut self, label: &str, blank: bool) -> bool {
+        if blank || self.local_surface || self.pending_focus.as_deref() != Some(label) {
+            return false;
+        }
+        self.pending_focus = None;
+        true
+    }
+}
+
 #[derive(Default)]
 pub struct Windows {
     pub entries: HashMap<String, Tabs>,
@@ -142,6 +156,7 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
                     }
                 }
             }
+            let _ = view.app_handle().emit("tabs-changed", ());
         })
         .on_new_window(move |url, features| {
             if crate::is_web_address(&url) {
@@ -189,7 +204,9 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
             interaction: Vec::new(),
         });
     }
-    select(app, window.label(), &label)
+    select(app, window.label(), &label)?;
+    let _ = app.emit("tabs-changed", ());
+    Ok(())
 }
 
 // ---------------------------------------------------------
@@ -265,11 +282,12 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
     {
         let state = app.state::<Mutex<Windows>>();
         let mut windows = state.lock().map_err(|error| error.to_string())?;
-        windows
+        let tabs = windows
             .entries
             .get_mut(window)
-            .ok_or("The window is no longer available.")?
-            .active = label.into();
+            .ok_or("The window is no longer available.")?;
+        tabs.active = label.into();
+        tabs.pending_focus = None;
     }
     #[cfg(target_os = "macos")]
     crate::native_toolbar::tab_changed(app, window);
@@ -449,6 +467,7 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
         crate::browser_data::closed(app, session);
     }
     crate::browser_data::checkpoint(app);
+    let _ = app.emit("tabs-changed", ());
     if next.is_none() {
         content
             .window()

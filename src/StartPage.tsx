@@ -39,13 +39,15 @@ export default function StartPage(): JSX.Element {
 
   useEffect((): (() => void) => {
     let active = true;
+    let generation = 0;
     function refresh(): void {
+      const request = ++generation;
       void invoke<Snapshot>("get_start_page")
         .then((value: Snapshot): void => {
-          if (active) setSnapshot(value);
+          if (active && request === generation) setSnapshot(value);
         })
         .catch((cause: unknown): void => {
-          if (active) setError(String(cause));
+          if (active && request === generation) setError(String(cause));
         });
     }
     refresh();
@@ -54,7 +56,15 @@ export default function StartPage(): JSX.Element {
       listen("saved-pages-changed", refresh),
       listen("start-page-changed", refresh),
       listen("history-changed", refresh),
+      listen("tabs-changed", refresh),
     ];
+    void Promise.all(subscriptions)
+      .then((): void => {
+        if (active) refresh();
+      })
+      .catch((cause: unknown): void => {
+        if (active) setError(String(cause));
+      });
     return (): void => {
       active = false;
       window.removeEventListener("focus", refresh);
