@@ -425,6 +425,7 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
         if tabs.persistent {
             let tab = &tabs.entries[index];
             closed = Some(crate::browser_data::SessionWindow {
+                id: String::new(),
                 tabs: vec![crate::browser_data::SessionTab {
                     url: url.to_string(),
                     title: tab.title.clone(),

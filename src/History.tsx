@@ -4,6 +4,7 @@ import { type ChangeEvent, type JSX, useEffect, useState } from "react";
 
 type Visit = { url: string; title: string; visitedAt: number };
 type ClosedWindow = {
+  id: string;
   closed_at: number;
   tabs: { url: string; title: string }[];
   is_window: boolean;
@@ -131,12 +132,12 @@ export default function History(): JSX.Element | null {
         <details className="recently-closed">
           <summary>Recently Closed</summary>
           {closed.map(
-            (session, index): JSX.Element => (
+            (session): JSX.Element => (
               <button
                 type="button"
-                key={session.closed_at}
+                key={session.id}
                 onClick={(): void => {
-                  void invoke("history_reopen", { index })
+                  void invoke("history_reopen", { id: session.id })
                     .then((): void => {
                       setVisible(false);
                     })

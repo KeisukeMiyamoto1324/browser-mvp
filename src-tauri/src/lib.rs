@@ -268,12 +268,12 @@ async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn history_reopen(webview: Webview, index: Option<usize>) -> Result<(), String> {
+async fn history_reopen(webview: Webview, id: String) -> Result<(), String> {
     browser_content(&webview)?;
     let handle = webview.app_handle().clone();
     let owner = webview.window().label().to_string();
     on_main(webview.app_handle(), move || {
-        restore_closed_at(&handle, &owner, index.unwrap_or(0))
+        restore_closed_id(&handle, &owner, &id)
     })
     .await
 }
@@ -289,6 +289,7 @@ async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWin
         .iter()
         .rev()
         .map(|session| browser_data::SessionWindow {
+            id: session.id.clone(),
             tabs: session
                 .tabs
                 .iter()
@@ -414,10 +415,21 @@ fn restore_window(
 }
 
 fn restore_closed(app: &tauri::AppHandle, owner: &str) -> Result<(), String> {
-    restore_closed_at(app, owner, 0)
+    let id = app
+        .state::<Mutex<browser_data::Store>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .data
+        .closed
+        .last()
+        .map(|entry| entry.id.clone());
+    let Some(id) = id else {
+        return Ok(());
+    };
+    restore_closed_id(app, owner, &id)
 }
 
-fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Result<(), String> {
+fn restore_closed_id(app: &tauri::AppHandle, owner: &str, id: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _main_thread = objc2_foundation::MainThreadMarker::new()
         .ok_or("Closed tab restoration must run on the main thread.")?;
@@ -428,12 +440,9 @@ fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Resul
         .data
         .closed
         .iter()
-        .rev()
-        .nth(index)
-        .cloned();
-    let Some(session) = session else {
-        return Ok(());
-    };
+        .find(|session| session.id == id)
+        .cloned()
+        .ok_or("The recently closed item is no longer available.")?;
     if !session.is_window && session.tabs.len() == 1 && app.get_window(owner).is_some() {
         let url = tauri::Url::parse(&session.tabs[0].url).map_err(|error| error.to_string())?;
         if url.as_str() != "about:blank" && !is_web_address(&url) {
@@ -475,9 +484,7 @@ fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Resul
     }
     let state = app.state::<Mutex<browser_data::Store>>();
     let mut store = state.lock().map_err(|error| error.to_string())?;
-    if let Some(position) = store.data.closed.len().checked_sub(index + 1) {
-        store.data.closed.remove(position);
-    }
+    store.remove_closed(id)?;
     store.save()
 }
 
@@ -718,7 +725,8 @@ pub fn run() {
         })
         .setup(|app| {
             let path = app.path().app_data_dir()?.join("browser-session.json");
-            let store = browser_data::Store::load(path)?;
+            let mut store = browser_data::Store::load(path)?;
+            store.restoring = true;
             let sessions = store.data.windows.clone();
             *app.state::<Mutex<browser_data::Store>>()
                 .lock()
@@ -753,6 +761,11 @@ pub fn run() {
                     .ok_or("Missing window.")?
                     .pending_restore = Some(session);
             }
+            app.state::<Mutex<browser_data::Store>>()
+                .lock()
+                .map_err(|error| error.to_string())?
+                .restoring = false;
+            browser_data::checkpoint(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
