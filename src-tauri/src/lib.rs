@@ -4,6 +4,7 @@ mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
 mod saved_pages;
+mod start_page;
 mod tabs;
 
 use std::sync::Mutex;
@@ -224,6 +225,14 @@ async fn browser_navigation(
                         progress: native.estimatedProgress(),
                     }
                 };
+                let local_surface = handle
+                    .state::<Mutex<tabs::Windows>>()
+                    .lock()
+                    .ok()
+                    .and_then(|windows| windows.entries.get(&owner).map(|tabs| tabs.local_surface))
+                    .unwrap_or(false);
+                native
+                    .setHidden(state.url.is_empty() || state.url == "about:blank" || local_surface);
                 native_toolbar::update(&state, &owner);
                 native_toolbar::update_tabs(&handle, &owner);
                 let _ = sender.try_send(state);
@@ -833,7 +842,10 @@ pub fn run() {
             history_clear,
             history_visible,
             history_reopen,
-            history_recent
+            history_recent,
+            start_page::get_start_page,
+            start_page::set_start_page,
+            start_page::select_suggested_tab
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")

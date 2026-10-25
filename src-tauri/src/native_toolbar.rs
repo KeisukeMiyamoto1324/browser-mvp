@@ -74,6 +74,10 @@ struct ToolbarControls {
     address_width: Retained<NSLayoutConstraint>,
     loading: Cell<Option<bool>>,
     new_tab_item: Retained<NSToolbarItem>,
+    suggestions: Retained<NSGlassEffectView>,
+    suggestion_rows: Vec<Retained<NSButton>>,
+    destinations: RefCell<Vec<crate::start_page::Destination>>,
+    selection: Cell<Option<usize>>,
 }
 
 // ---------------------------------------------------------
@@ -113,15 +117,51 @@ define_class!(
     }
 
     unsafe impl NSControlTextEditingDelegate for BrowserToolbar {
+        #[unsafe(method(controlTextDidBeginEditing:))]
+        fn begin_editing(&self, _notification: &NSNotification) {
+            self.refresh_suggestions();
+        }
+
+        #[unsafe(method(controlTextDidChange:))]
+        fn change_editing(&self, _notification: &NSNotification) {
+            self.refresh_suggestions();
+        }
+
         #[unsafe(method(controlTextDidEndEditing:))]
         fn end_editing(&self, _notification: &NSNotification) {
             self.ivars().address.setAlignment(NSTextAlignment::Center);
+            self.ivars().suggestions.setHidden(true);
+            self.ivars().selection.set(None);
         }
 
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _control: &NSControl, _editor: &NSTextView, command: objc2::runtime::Sel) -> bool {
-            if command != sel!(cancelOperation:) { return false.into(); }
             let controls = self.ivars();
+            if !controls.suggestions.isHidden() && (command == sel!(moveDown:) || command == sel!(moveUp:)) {
+                let count = controls.destinations.borrow().len();
+                if count == 0 { return false.into(); }
+                let next = match (controls.selection.get(), command == sel!(moveDown:)) {
+                    (None, true) => 0,
+                    (None, false) => count - 1,
+                    (Some(index), true) => (index + 1) % count,
+                    (Some(index), false) => (index + count - 1) % count,
+                };
+                controls.selection.set(Some(next));
+                for (index, row) in controls.suggestion_rows.iter().enumerate() {
+                    row.highlight(index == next);
+                }
+                return true.into();
+            }
+            if command == sel!(insertNewline:) && !controls.suggestions.isHidden() && let Some(index) = controls.selection.get() {
+                self.open_suggestion(index);
+                return true.into();
+            }
+            if command != sel!(cancelOperation:) { return false.into(); }
+            if !controls.suggestions.isHidden() {
+                controls.suggestions.setHidden(true);
+                controls.selection.set(None);
+                return true.into();
+            }
             let url = NSString::from_str(&controls.address.ivars().url.borrow());
             if controls.address.stringValue() != url {
                 controls.address.setStringValue(&url);
@@ -140,9 +180,16 @@ define_class!(
     unsafe impl NSTextFieldDelegate for BrowserToolbar {}
 
     impl BrowserToolbar {
+        #[unsafe(method(selectSuggestion:))]
+        fn select_suggestion(&self, sender: &NSButton) {
+            self.open_suggestion(sender.tag() as usize);
+        }
+
         #[unsafe(method(navigate:))]
         fn navigate(&self, _sender: &NSTextField) {
             let controls = self.ivars();
+            controls.suggestions.setHidden(true);
+            controls.selection.set(None);
             let address = controls.address.stringValue().to_string();
             let result = crate::resolve_address(&address).and_then(|url| {
                 crate::tabs::active(&controls.handle, &controls.window_label).ok_or_else(|| String::from("The browser WebView is not ready."))?
@@ -301,6 +348,24 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     );
     new_tab_item.setAutovalidates(false);
     new_tab_item.setEnabled(true);
+    let suggestions = NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), NSRect::ZERO);
+    suggestions.setCornerRadius(14.0);
+    suggestions.setHidden(true);
+    suggestions.setAccessibilityLabel(Some(ns_string!("Address suggestions")));
+    let suggestion_content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+    let mut suggestion_rows = Vec::new();
+    for index in 0..8 {
+        let row = NSButton::new(mtm);
+        row.setTag(index);
+        row.setBordered(false);
+        row.setRefusesFirstResponder(true);
+        row.setAlignment(NSTextAlignment::Left);
+        row.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        row.setHidden(true);
+        suggestion_content.addSubview(&row);
+        suggestion_rows.push(row);
+    }
+    suggestions.setContentView(Some(&suggestion_content));
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
         window: native.clone(),
         handle: window.app_handle().clone(),
@@ -314,10 +379,18 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
         address_width,
         loading: Cell::new(None),
         new_tab_item,
+        suggestions,
+        suggestion_rows,
+        destinations: RefCell::new(Vec::new()),
+        selection: Cell::new(None),
     });
     let delegate: Retained<BrowserToolbar> = unsafe { msg_send![super(delegate), init] };
     let controls = delegate.ivars();
     unsafe {
+        for row in &controls.suggestion_rows {
+            row.setTarget(Some(&delegate));
+            row.setAction(Some(sel!(selectSuggestion:)));
+        }
         controls.new_tab_item.setTarget(Some(&delegate));
         controls.new_tab_item.setAction(Some(sel!(newTab:)));
         controls.address.setTarget(Some(&delegate));
@@ -360,6 +433,10 @@ pub fn update(state: &NavigationState, window_label: &str) {
             return;
         };
         let controls = toolbar.ivars();
+        if !controls.window.isKeyWindow() {
+            controls.suggestions.setHidden(true);
+            controls.selection.set(None);
+        }
         let title = if state.title.is_empty() {
             "New Tab"
         } else {
@@ -420,6 +497,8 @@ pub fn update(state: &NavigationState, window_label: &str) {
         let width = (controls.window.frame().size.width * 0.41).max(220.0);
         if (controls.address_width.constant() - width).abs() > 0.5 {
             controls.address_width.setConstant(width);
+            controls.suggestions.setHidden(true);
+            controls.selection.set(None);
         }
     });
 }
@@ -519,6 +598,8 @@ pub fn tab_changed(app: &tauri::AppHandle, window_label: &str) {
         };
         let controls = toolbar.ivars();
         controls.window.makeFirstResponder(None);
+        controls.suggestions.setHidden(true);
+        controls.selection.set(None);
         let url = crate::tabs::active(app, window_label)
             .and_then(|content| crate::tabs::current_url(&content).ok())
             .map(|url| url.to_string())
@@ -541,4 +622,118 @@ pub fn tab_changed(app: &tauri::AppHandle, window_label: &str) {
 
 pub fn update_tabs(app: &tauri::AppHandle, window_label: &str) {
     crate::native_tabs::update(app, window_label);
+}
+
+// ---------------------------------------------------------
+// Keep typing in the native field while showing real matches.
+// Buttons accept clicks without taking the editor's focus.
+// ---------------------------------------------------------
+impl BrowserToolbar {
+    fn refresh_suggestions(&self) {
+        let controls = self.ivars();
+        let query = controls.address.stringValue().to_string();
+        let mut destinations = crate::start_page::destinations(&controls.handle);
+        destinations.extend(crate::start_page::favorites(&controls.handle));
+        let lower = query.trim().to_lowercase();
+        let mut seen = std::collections::HashSet::new();
+        destinations.retain(|entry| {
+            (entry.title.to_lowercase().contains(&lower)
+                || entry.url.to_lowercase().contains(&lower))
+                && seen.insert(entry.url.clone())
+        });
+        if !lower.is_empty() {
+            destinations.insert(
+                0,
+                crate::start_page::Destination {
+                    title: format!("Search or open: {}", query.trim()),
+                    url: query.trim().to_string(),
+                    tab: None,
+                    window: None,
+                },
+            );
+        }
+        destinations.truncate(8);
+        let Some(root) = controls.window.contentView() else {
+            return;
+        };
+        let count = destinations.len();
+        controls.selection.set(None);
+        if count == 0 {
+            controls.suggestions.setHidden(true);
+            controls.destinations.borrow_mut().clear();
+            return;
+        }
+        let width = (controls.address_width.constant() + 80.0).min(root.bounds().size.width - 24.0);
+        let height = count as f64 * 44.0 + 16.0;
+        let layout = controls.window.contentLayoutRect();
+        let top = if root.isFlipped() {
+            root.bounds().size.height - layout.size.height
+        } else {
+            layout.size.height - height
+        };
+        controls.suggestions.setFrame(NSRect::new(
+            NSPoint::new((root.bounds().size.width - width) / 2.0, top),
+            NSSize::new(width, height),
+        ));
+        if let Some(content) = controls.suggestions.contentView() {
+            content.setFrameSize(NSSize::new(width, height));
+        }
+        for (index, row) in controls.suggestion_rows.iter().enumerate() {
+            row.setHidden(index >= count);
+            row.highlight(false);
+            let Some(entry) = destinations.get(index) else {
+                continue;
+            };
+            let title = if entry.tab.is_some() {
+                format!("Switch to Tab — {}", entry.title)
+            } else {
+                entry.title.clone()
+            };
+            row.setTitle(&NSString::from_str(&title));
+            row.setToolTip(Some(&NSString::from_str(&entry.url)));
+            row.setAccessibilityLabel(Some(&NSString::from_str(&format!(
+                "{title}, {}",
+                entry.url
+            ))));
+            row.setFrame(NSRect::new(
+                NSPoint::new(8.0, height - 8.0 - (index + 1) as f64 * 44.0),
+                NSSize::new(width - 16.0, 42.0),
+            ));
+        }
+        *controls.destinations.borrow_mut() = destinations;
+        root.addSubview_positioned_relativeTo(
+            &controls.suggestions,
+            NSWindowOrderingMode::Above,
+            None,
+        );
+        controls.suggestions.setHidden(false);
+    }
+
+    fn open_suggestion(&self, index: usize) {
+        let controls = self.ivars();
+        let Some(destination) = controls.destinations.borrow().get(index).cloned() else {
+            return;
+        };
+        controls.suggestions.setHidden(true);
+        controls.selection.set(None);
+        controls.window.makeFirstResponder(None);
+        let (Some(window), Some(tab)) = (destination.window, destination.tab) else {
+            controls
+                .address
+                .setStringValue(&NSString::from_str(&destination.url));
+            self.navigate(&controls.address);
+            return;
+        };
+        let result = crate::tabs::select(&controls.handle, &window, &tab).and_then(|()| {
+            controls
+                .handle
+                .get_window(&window)
+                .ok_or_else(|| "The window is no longer available.".to_string())?
+                .set_focus()
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = result {
+            eprintln!("Could not open suggestion: {error}");
+        }
+    }
 }
