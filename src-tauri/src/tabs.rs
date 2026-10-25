@@ -79,6 +79,20 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
     let content = window
         .add_child(builder, bounds.position, bounds.size)
         .map_err(|error| error.to_string())?;
+    // ---------------------------------------------------------
+    // Resize with AppKit during native window animations.
+    // Child WebViews otherwise keep fixed dimensions in Wry.
+    // ---------------------------------------------------------
+    #[cfg(target_os = "macos")]
+    content
+        .with_webview(|platform| {
+            let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
+            native.setAutoresizingMask(
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                    | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+        })
+        .map_err(|error| error.to_string())?;
     content.hide().map_err(|error| error.to_string())?;
     {
         let state = app.state::<Mutex<Tabs>>();
@@ -151,12 +165,15 @@ pub fn open(app: &AppHandle, url: tauri::Url) -> Result<(), String> {
     window.unminimize().map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
-    let bounds = app
-        .state::<Mutex<Tabs>>()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .bounds
-        .ok_or("The tab layout is not ready.")?;
+    let bounds = if let Some(content) = active(app) {
+        content.bounds().map_err(|error| error.to_string())?
+    } else {
+        app.state::<Mutex<Tabs>>()
+            .lock()
+            .map_err(|error| error.to_string())?
+            .bounds
+            .ok_or("The tab layout is not ready.")?
+    };
     create(&window, url, bounds)
 }
 
