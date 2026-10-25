@@ -143,6 +143,7 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
             }
         })
         .on_document_title_changed(|view, title| {
+            let address = current_url(&view).ok();
             let state = view.state::<Mutex<Windows>>();
             if let Ok(mut windows) = state.lock()
                 && let Some(tabs) = windows.entries.get_mut(view.window().label())
@@ -152,6 +153,9 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
                     .find(|tab| tab.label == view.label())
             {
                 tab.title = title.clone();
+                if let Some(address) = address {
+                    tab.url = address.to_string();
+                }
                 if tabs.persistent {
                     let state = view.state::<Mutex<crate::browser_data::Store>>();
                     if let Ok(mut store) = state.lock()
@@ -220,7 +224,7 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
     let content = app
         .get_webview(label)
         .ok_or("The tab is no longer available.")?;
-    let previous = {
+    let (previous, local_surface) = {
         let state = app.state::<Mutex<Windows>>();
         let windows = state.lock().map_err(|error| error.to_string())?;
         let tabs = windows
@@ -230,10 +234,15 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
         if !tabs.entries.iter().any(|tab| tab.label == label) {
             return Err("Unknown tab.".into());
         }
-        tabs.active.clone()
+        (tabs.active.clone(), tabs.local_surface)
     };
     capture(app, window);
-    content.show().map_err(|error| error.to_string())?;
+    if local_surface {
+        content.hide()
+    } else {
+        content.show()
+    }
+    .map_err(|error| error.to_string())?;
     if previous != label
         && let Some(old) = app.get_webview(&previous)
         && let Err(error) = old.hide()
@@ -253,6 +262,9 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
     #[cfg(target_os = "macos")]
     crate::native_toolbar::tab_changed(app, window);
     crate::browser_data::checkpoint(app);
+    if local_surface {
+        return Ok(());
+    }
     content.set_focus().map_err(|error| error.to_string())
 }
 
@@ -279,8 +291,8 @@ pub fn open(app: &AppHandle, owner: &str, url: tauri::Url) -> Result<Window, Str
 }
 
 // ---------------------------------------------------------
-// Keep closed destinations available after a window closes.
-// Full closed-window and document restoration is separate.
+// Route tab actions through the owning window.
+// Recently closed documents use the persistent restore store.
 // ---------------------------------------------------------
 pub fn perform(app: &AppHandle, window: &str, action: &str) -> Result<(), String> {
     if matches!(action, "next-tab" | "previous-tab") {

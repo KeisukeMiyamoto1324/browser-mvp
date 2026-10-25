@@ -304,14 +304,18 @@ async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWin
 #[tauri::command]
 async fn history_visible(webview: Webview, visible: bool) -> Result<(), String> {
     let content = browser_content(&webview)?;
-    webview
-        .state::<Mutex<tabs::Windows>>()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .entries
-        .get_mut(webview.window().label())
-        .ok_or("Missing window.")?
-        .local_surface = visible;
+    {
+        let state = webview.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(webview.window().label())
+            .ok_or("Missing window.")?;
+        if tabs.local_surface == visible {
+            return Ok(());
+        }
+        tabs.local_surface = visible;
+    }
     if visible {
         webview.set_focus().map_err(|error| error.to_string())?;
     }
