@@ -488,6 +488,7 @@ pub fn update(app: &tauri::AppHandle, window_label: &str) {
 }
 
 pub fn remove(window_label: &str) {
+    crate::native_tab_navigation::remove_window(window_label);
     STRIP.with(|slot| {
         slot.borrow_mut().remove(window_label);
     });

@@ -150,6 +150,8 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
             );
         })
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::native_tab_navigation::install(&content, window.label())?;
     content.hide().map_err(|error| error.to_string())?;
     {
         let state = app.state::<Mutex<Windows>>();
@@ -474,6 +476,8 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
         select(app, window, next)?;
     }
     content.close().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::native_tab_navigation::remove(label);
     {
         let state = app.state::<Mutex<Windows>>();
         let mut windows = state.lock().map_err(|error| error.to_string())?;
@@ -633,6 +637,46 @@ pub fn restore_document(
     restored.title = tab.title.clone();
     restored.interaction = tab.interaction.clone();
     Ok(())
+}
+
+// ---------------------------------------------------------
+// The native delegate calls this only for top-level frames.
+// Leave subframe navigation with the existing WebKit policy.
+// ---------------------------------------------------------
+pub(crate) fn divert_pinned_navigation(
+    app: &AppHandle,
+    owner: &str,
+    label: &str,
+    url: &tauri::Url,
+) -> bool {
+    if !crate::is_web_address(url) {
+        return false;
+    }
+    let external = app
+        .state::<Mutex<Windows>>()
+        .lock()
+        .ok()
+        .and_then(|windows| {
+            windows
+                .entries
+                .get(owner)
+                .and_then(|tabs| tabs.entries.iter().find(|tab| tab.label == label))
+                .and_then(|tab| tab.pinned_url.as_ref())
+                .map(|destination| leaves_pinned_site(destination, url))
+        })
+        .unwrap_or(false);
+    if !external {
+        return false;
+    }
+    let handle = app.clone();
+    let owner = owner.to_string();
+    let destination = url.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(error) = open(&handle, &owner, destination) {
+            eprintln!("Could not open pinned-tab link: {error}");
+        }
+    });
+    true
 }
 
 // ---------------------------------------------------------

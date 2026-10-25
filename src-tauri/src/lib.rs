@@ -2,6 +2,8 @@ mod browser_data;
 #[cfg(target_os = "macos")]
 mod native_popup;
 #[cfg(target_os = "macos")]
+mod native_tab_navigation;
+#[cfg(target_os = "macos")]
 mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
