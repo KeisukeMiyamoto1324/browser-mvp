@@ -815,6 +815,8 @@ pub fn run() {
             )?;
             menu.insert(&history, 4)?;
             #[cfg(target_os = "macos")]
+            let mut stop_item = None;
+            #[cfg(target_os = "macos")]
             for item in menu.items()? {
                 let Some(submenu) = item.as_submenu() else {
                     continue;
@@ -853,13 +855,14 @@ pub fn run() {
                             ("next-tab", "Show Next Tab", "Ctrl+Tab"),
                             ("previous-tab", "Show Previous Tab", "Ctrl+Shift+Tab"),
                         ] {
-                            submenu.append(&tauri::menu::MenuItem::with_id(
+                            let item = tauri::menu::MenuItem::with_id(
                                 app,
                                 id,
                                 label,
                                 true,
                                 Some(shortcut),
-                            )?)?;
+                            )?;
+                            submenu.append(&item)?;
                         }
                         submenu.prepend(&tauri::menu::MenuItem::with_id(
                             app,
@@ -876,9 +879,15 @@ pub fn run() {
                             Some("CmdOrCtrl+."),
                         )?;
                         submenu.prepend(&stop)?;
-                        app.manage(BrowserMenu { stop });
+                        stop_item = Some(stop);
                     }
                     _ => {}
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(stop) = stop_item {
+                    app.manage(BrowserMenu { stop });
                 }
             }
             Ok(menu)
@@ -1036,7 +1045,7 @@ pub fn run() {
             history_recent,
             start_page::get_start_page,
             start_page::set_start_page,
-            start_page::select_suggested_tab
+            start_page::select_suggested_tab,
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")

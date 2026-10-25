@@ -31,7 +31,7 @@ Native UI checks on macOS 27.0.1 confirmed mouse and Command-L address entry, Re
 
 Local paired captures include the reference address-editing state and application native toolbar/editing/loading/full-screen states. Screenshots showed a rectangular focus ring, oversized loading track, and a capped address width in full screen; these were adjusted. Full-screen captures use the same 6016 × 3384 display; normal-window dimensions still differ. A corner-drag attempt did not change the app dimensions and is not a passed resize test.
 
-The reference has additional sidebar, group, page, translation, sharing and new-tab controls plus a favorites bar. These features remain absent and tracked in #3–#7. Address editing still includes the URL scheme, and suggestion panels are not implemented (#4). Light-mode appearance, small-window resizing, exact typography/colors, toolbar overflow, all menu/dialog states, and motion timing still need comparison. Full-screen entry/exit was exercised, but screenshots alone do not prove animation parity. #2 and #10 remain open; there is no visual sign-off.
+The reference has additional sidebar, group, page, translation, sharing and new-tab controls plus a favorites bar. Sidebar UI is no longer planned per user. The other features remain absent and tracked in #3–#7. Address editing still includes the URL scheme, and suggestion panels are not implemented (#4). Light-mode appearance, small-window resizing, exact typography/colors, toolbar overflow, all menu/dialog states, and motion timing still need comparison. Full-screen entry/exit was exercised, but screenshots alone do not prove animation parity. #2 and #10 remain open; there is no visual sign-off.
 
 ### Controlled native Zoom fixture (#14)
 
