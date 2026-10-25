@@ -141,9 +141,12 @@
 .saved-editor > div {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
   margin-top: 10px;
 }
 .saved-editor button {
+  flex: 0 0 auto;
+  min-width: 56px;
   font-size: 12px;
   height: 28px;
 }

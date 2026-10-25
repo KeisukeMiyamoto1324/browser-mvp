@@ -56,6 +56,12 @@ export default function Sidebar({
   const [selected, setSelected] = useState<number | null>(null);
   const [context, setContext] = useState<{ x: number; y: number } | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
+  useEffect((): void => {
+    if (selected !== null)
+      document
+        .getElementById(`saved-${selected}`)
+        ?.scrollIntoView({ block: "nearest" });
+  }, [selected]);
   const [error, setError] = useState("");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const current = useRef({ url, title });
