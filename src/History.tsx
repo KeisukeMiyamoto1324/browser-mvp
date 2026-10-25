@@ -74,8 +74,12 @@ export default function History(): JSX.Element | null {
     const since = range === "all" ? 0 : Date.now() - hours * 3600000;
     try {
       await invoke("history_clear", { since });
-      setVisits(await invoke<Visit[]>("history_query", { query }));
-      setClosed([]);
+      const [history, recent] = await Promise.all([
+        invoke<Visit[]>("history_query", { query }),
+        invoke<ClosedWindow[]>("history_recent"),
+      ]);
+      setVisits(history);
+      setClosed(recent);
       setClearDialog(false);
     } catch (cause: unknown) {
       setError(String(cause));

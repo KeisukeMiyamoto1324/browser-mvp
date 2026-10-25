@@ -113,6 +113,17 @@ impl Store {
             .map_err(|error| error.to_string())
     }
 
+    pub fn clear_history(&mut self, since: u64) -> Result<(), String> {
+        let previous = self.data.clone();
+        self.data.visits.retain(|visit| visit.visited_at < since);
+        self.data.closed.retain(|session| session.closed_at < since);
+        if let Err(error) = self.save() {
+            self.data = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn replace_windows(&mut self, windows: Vec<SessionWindow>) -> Result<(), String> {
         if self.quitting || self.restoring {
             return Ok(());
@@ -453,6 +464,47 @@ mod tests {
         assert!(store.remove_closed(&selected_id).is_err());
         assert_eq!(store.data.closed.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn clearing_a_time_range_keeps_older_closed_documents() -> Result<(), String> {
+        let directory = std::env::temp_dir().join(format!(
+            "browser-clear-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("session.json");
+        let mut store = Store::load(path.clone())?;
+        for timestamp in [10, 20, 30] {
+            store.data.visits.push(Visit {
+                url: format!("https://example.com/{timestamp}"),
+                title: timestamp.to_string(),
+                visited_at: timestamp,
+            });
+            store.data.closed.push(SessionWindow {
+                id: format!("closed-{timestamp}"),
+                closed_at: timestamp,
+                tabs: vec![SessionTab {
+                    url: format!("https://example.com/{timestamp}"),
+                    interaction: vec![timestamp as u8],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        store.clear_history(20)?;
+        let after = Store::load(path)?;
+        assert_eq!(after.data.visits.len(), 1);
+        assert_eq!(after.data.closed.len(), 1);
+        assert_eq!(after.data.closed[0].id, "closed-10");
+        assert_eq!(after.data.closed[0].tabs[0].interaction, vec![10]);
+        store.clear_history(0)?;
+        assert!(store.data.visits.is_empty());
+        assert!(store.data.closed.is_empty());
+        fs::remove_dir_all(directory).map_err(|error| error.to_string())
     }
 
     #[test]

@@ -257,14 +257,7 @@ async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
     browser_content(&webview)?;
     let state = webview.state::<Mutex<browser_data::Store>>();
     let mut store = state.lock().map_err(|error| error.to_string())?;
-    let previous = store.data.clone();
-    store.data.visits.retain(|visit| visit.visited_at < since);
-    store.data.closed.clear();
-    if let Err(error) = store.save() {
-        store.data = previous;
-        return Err(error);
-    }
-    Ok(())
+    store.clear_history(since)
 }
 
 #[tauri::command]
@@ -309,28 +302,42 @@ async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWin
 
 #[tauri::command]
 async fn history_visible(webview: Webview, visible: bool) -> Result<(), String> {
-    let content = browser_content(&webview)?;
-    {
+    browser_content(&webview)?;
+    let app = webview.app_handle().clone();
+    on_main(&app, move || {
+        let content = browser_content(&webview)?;
+        {
+            let state = webview.state::<Mutex<tabs::Windows>>();
+            let mut windows = state.lock().map_err(|error| error.to_string())?;
+            let tabs = windows
+                .entries
+                .get_mut(webview.window().label())
+                .ok_or("Missing window.")?;
+            if tabs.local_surface == visible {
+                return Ok(());
+            }
+            tabs.local_surface = visible;
+            tabs.pending_focus = if visible {
+                None
+            } else {
+                Some(tabs.active.clone())
+            };
+        }
+        let blank = tabs::current_url(&content)?.as_str() == "about:blank";
+        if visible || blank {
+            content.hide().map_err(|error| error.to_string())?;
+            return webview.set_focus().map_err(|error| error.to_string());
+        }
+        content.show().map_err(|error| error.to_string())?;
+        content.set_focus().map_err(|error| error.to_string())?;
         let state = webview.state::<Mutex<tabs::Windows>>();
         let mut windows = state.lock().map_err(|error| error.to_string())?;
-        let tabs = windows
-            .entries
-            .get_mut(webview.window().label())
-            .ok_or("Missing window.")?;
-        if tabs.local_surface == visible {
-            return Ok(());
+        if let Some(tabs) = windows.entries.get_mut(webview.window().label()) {
+            tabs.pending_focus = None;
         }
-        tabs.local_surface = visible;
-    }
-    if visible {
-        webview.set_focus().map_err(|error| error.to_string())?;
-    }
-    if visible {
-        content.hide()
-    } else {
-        content.show()
-    }
-    .map_err(|error| error.to_string())
+        Ok(())
+    })
+    .await
 }
 
 // ---------------------------------------------------------

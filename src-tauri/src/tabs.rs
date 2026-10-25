@@ -13,6 +13,7 @@ pub struct Tab {
 pub struct Tabs {
     pub persistent: bool,
     pub local_surface: bool,
+    pub pending_focus: Option<String>,
     pub pending_restore: Option<crate::browser_data::SessionWindow>,
     pub entries: Vec<Tab>,
     pub active: String,
@@ -27,6 +28,7 @@ impl Default for Tabs {
         Self {
             persistent: true,
             local_surface: false,
+            pending_focus: None,
             pending_restore: None,
             entries: Vec::new(),
             active: String::new(),
