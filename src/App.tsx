@@ -7,7 +7,9 @@ import {
   useRef,
   useState,
 } from "react";
+
 import History from "./History";
+import StartPage from "./StartPage";
 
 type NavigationState = {
   url: string;
@@ -23,7 +25,7 @@ type NavigationState = {
 // Control the native content WebView from the local toolbar.
 // ---------------------------------------------------------
 export default function App(): JSX.Element {
-  const [address, setAddress] = useState("https://duckduckgo.com/");
+  const [address, setAddress] = useState("");
   const [error, setError] = useState("");
   const editing = useRef(false);
   const [navigation, setNavigation] = useState<NavigationState>({
@@ -99,97 +101,95 @@ export default function App(): JSX.Element {
     }
   }
 
-  if (navigation.nativeToolbar)
-    return (
-      <main>
-        <History />
-      </main>
-    );
+  const isStartPage = !navigation.url || navigation.url === "about:blank";
 
   return (
     <main>
+      {isStartPage && <StartPage />}
       <History />
-      <nav className="toolbar" aria-label="Browser controls">
-        <button
-          type="button"
-          disabled={!navigation.canGoBack}
-          aria-label="Back"
-          title="Back"
-          onClick={(): void => {
-            void controlNavigation("back");
-          }}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m14 6-6 6 6 6" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          disabled={!navigation.canGoForward}
-          aria-label="Forward"
-          title="Forward"
-          onClick={(): void => {
-            void controlNavigation("forward");
-          }}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m10 6 6 6-6 6" />
-          </svg>
-        </button>
-        <form
-          onSubmit={(event: FormEvent<HTMLFormElement>): void => {
-            void navigate(event);
-          }}
-        >
-          <input
-            type="text"
-            name="address"
-            aria-label="Search or enter a URL"
-            placeholder="Search or enter a URL"
-            value={address}
-            autoCapitalize="off"
-            autoComplete="off"
-            spellCheck={false}
-            onFocus={(): void => {
-              editing.current = true;
-            }}
-            onBlur={(): void => {
-              editing.current = false;
-            }}
-            onChange={(event: ChangeEvent<HTMLInputElement>): void => {
-              setAddress(event.target.value);
-            }}
-          />
+      {!navigation.nativeToolbar && (
+        <nav className="toolbar" aria-label="Browser controls">
           <button
-            className="reload"
             type="button"
-            aria-label={
-              navigation.loading ? "Stop loading" : "Reload this page"
-            }
-            title={navigation.loading ? "Stop loading" : "Reload this page"}
+            disabled={!navigation.canGoBack}
+            aria-label="Back"
+            title="Back"
             onClick={(): void => {
-              void controlNavigation(navigation.loading ? "stop" : "reload");
+              void controlNavigation("back");
             }}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              {navigation.loading ? (
-                <path d="m7 7 10 10M17 7 7 17" />
-              ) : (
-                <path d="M19 10a7 7 0 1 0 0 5M19 4v6h-6" />
-              )}
+              <path d="m14 6-6 6 6 6" />
             </svg>
           </button>
-          {navigation.loading && (
-            <span
-              className="load-progress"
-              style={{ width: `${navigation.progress * 100}%` }}
+          <button
+            type="button"
+            disabled={!navigation.canGoForward}
+            aria-label="Forward"
+            title="Forward"
+            onClick={(): void => {
+              void controlNavigation("forward");
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m10 6 6 6-6 6" />
+            </svg>
+          </button>
+          <form
+            onSubmit={(event: FormEvent<HTMLFormElement>): void => {
+              void navigate(event);
+            }}
+          >
+            <input
+              type="text"
+              name="address"
+              aria-label="Search or enter a URL"
+              placeholder="Search or enter a URL"
+              value={address}
+              autoCapitalize="off"
+              autoComplete="off"
+              spellCheck={false}
+              onFocus={(): void => {
+                editing.current = true;
+              }}
+              onBlur={(): void => {
+                editing.current = false;
+              }}
+              onChange={(event: ChangeEvent<HTMLInputElement>): void => {
+                setAddress(event.target.value);
+              }}
             />
-          )}
-        </form>
-        <span className="error" role="status">
-          {error}
-        </span>
-      </nav>
+            <button
+              className="reload"
+              type="button"
+              aria-label={
+                navigation.loading ? "Stop loading" : "Reload this page"
+              }
+              title={navigation.loading ? "Stop loading" : "Reload this page"}
+              onClick={(): void => {
+                void controlNavigation(navigation.loading ? "stop" : "reload");
+              }}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                {navigation.loading ? (
+                  <path d="m7 7 10 10M17 7 7 17" />
+                ) : (
+                  <path d="M19 10a7 7 0 1 0 0 5M19 4v6h-6" />
+                )}
+              </svg>
+            </button>
+            {navigation.loading && (
+              <span
+                className="load-progress"
+                style={{ width: `${navigation.progress * 100}%` }}
+              />
+            )}
+          </form>
+          <span className="error" role="status">
+            {error}
+          </span>
+        </nav>
+      )}
     </main>
   );
 }

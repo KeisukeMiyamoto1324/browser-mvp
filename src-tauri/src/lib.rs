@@ -4,6 +4,7 @@ mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
 mod saved_pages;
+mod start_page;
 mod tabs;
 
 use std::sync::Mutex;
@@ -141,9 +142,18 @@ async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), St
 
 #[tauri::command]
 async fn navigate(webview: Webview, address: String) -> Result<(), String> {
-    browser_content(&webview)?
+    let content = browser_content(&webview)?;
+    content
         .navigate(resolve_address(&address)?)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let state = webview.state::<Mutex<tabs::Windows>>();
+    let mut windows = state.lock().map_err(|error| error.to_string())?;
+    let tabs = windows
+        .entries
+        .get_mut(webview.window().label())
+        .ok_or("The window is no longer available.")?;
+    tabs.pending_focus = Some(content.label().into());
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -224,6 +234,24 @@ async fn browser_navigation(
                         progress: native.estimatedProgress(),
                     }
                 };
+                // ---------------------------------------------------------
+                // Focus after the destination is visible, never the hidden
+                // blank child behind a local start or history surface.
+                // ---------------------------------------------------------
+                let blank = state.url.is_empty() || state.url == "about:blank";
+                let windows = handle.state::<Mutex<tabs::Windows>>();
+                let (local_surface, focus_content) = windows
+                    .lock()
+                    .ok()
+                    .and_then(|mut windows| {
+                        let tabs = windows.entries.get_mut(&owner)?;
+                        Some((tabs.local_surface, tabs.take_focus(&label, blank)))
+                    })
+                    .unwrap_or((false, false));
+                native.setHidden(blank || local_surface);
+                if focus_content && let Some(window) = native.window() {
+                    window.makeFirstResponder(Some(native));
+                }
                 native_toolbar::update(&state, &owner);
                 native_toolbar::update_tabs(&handle, &owner);
                 let _ = sender.try_send(state);
@@ -257,7 +285,10 @@ async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
     browser_content(&webview)?;
     let state = webview.state::<Mutex<browser_data::Store>>();
     let mut store = state.lock().map_err(|error| error.to_string())?;
-    store.clear_history(since)
+    store.clear_history(since)?;
+    drop(store);
+    let _ = webview.app_handle().emit("history-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -821,6 +852,7 @@ pub fn run() {
                     }
                 }
                 browser_data::checkpoint(window.app_handle());
+                let _ = window.app_handle().emit("tabs-changed", ());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -833,7 +865,10 @@ pub fn run() {
             history_clear,
             history_visible,
             history_reopen,
-            history_recent
+            history_recent,
+            start_page::get_start_page,
+            start_page::set_start_page,
+            start_page::select_suggested_tab
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")
@@ -923,6 +958,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{is_web_address, resolve_address};
+
+    #[test]
+    fn local_navigation_focus_waits_for_the_visible_destination() {
+        let mut tabs = super::tabs::Tabs {
+            pending_focus: Some("content-main-1".into()),
+            ..Default::default()
+        };
+        assert!(!tabs.take_focus("content-main-1", true));
+        tabs.local_surface = true;
+        assert!(!tabs.take_focus("content-main-1", false));
+        tabs.local_surface = false;
+        assert!(!tabs.take_focus("content-main-2", false));
+        assert!(tabs.take_focus("content-main-1", false));
+        assert!(!tabs.take_focus("content-main-1", false));
+    }
 
     #[test]
     fn toolbar_access_stays_with_its_registered_window() {
