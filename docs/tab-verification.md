@@ -38,3 +38,28 @@ restoration; verify the integrated popup path installs the same delegate;
 and compare timing and motion against controlled reference windows.
 The dragged cell follows the pointer, but adjacent cells have no animated
 insertion transition. Pinned controls currently display the first title letter.
+
+## Request-method preservation follow-up
+
+Only bodyless GET requests may use URL-only pinned-site diversion. POST and
+requests with body data or a body stream are forwarded to the original native
+navigation delegate without cancelling or reconstructing their request. A form
+may therefore navigate the pinned view to another host; preserving the form
+method and payload takes priority over URL-only diversion.
+
+The tab fixture includes **Submit other-host POST**. Pin the page at
+`http://127.0.0.1:18768/first`, submit it, and check the destination and
+`http://127.0.0.1:18768/submissions`. The received method must be POST, the fixture
+field must be `preserve-post-body`, and the message must retain its spaces,
+plus sign and ampersand. A GET at `/submitted` is a failure. Also repeat with an
+ordinary cross-host GET link to verify that safe link diversion still works.
+
+| UI/state | Reference capture | App capture | Comparison | Interaction/motion |
+| --- | --- | --- | --- | --- |
+| Pinned cross-host form before submission | Not captured | Not captured | Unverified | Unverified |
+| POST destination and retained body in the same view | Not captured | Not captured | Unverified | Unverified |
+| Cross-host GET in a regular tab; source pin retained | Not captured | Not captured | Unverified | Unverified |
+
+The native request policy has an automated test for default GET, POST, body
+and body-stream requests. CLI fixture checks do not establish browser runtime
+or visual equivalence; paired screenshots and interactions remain required.
