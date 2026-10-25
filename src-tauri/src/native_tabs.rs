@@ -506,6 +506,8 @@ mod tests {
                 title: String::new(),
                 pinned: true,
                 pinned_url: None,
+                url: String::new(),
+                interaction: Vec::new(),
             })
             .collect();
         entries.push(Tab {
@@ -513,6 +515,8 @@ mod tests {
             title: String::new(),
             pinned: false,
             pinned_url: None,
+            url: String::new(),
+            interaction: Vec::new(),
         });
         assert_eq!(tab_widths(&entries, 420.0), (20, 210.0));
         assert_eq!(tab_widths(&entries, 200.0), (20, 120.0));

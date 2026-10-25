@@ -493,6 +493,8 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
                     url: url.to_string(),
                     title: tab.title.clone(),
                     interaction: tab.interaction.clone(),
+                    pinned: tab.pinned,
+                    pinned_url: tab.pinned_url.as_ref().map(ToString::to_string),
                 }],
                 active: 0,
                 is_window: false,
@@ -599,6 +601,26 @@ pub fn restore_document(
     content: &Webview,
     tab: &crate::browser_data::SessionTab,
 ) -> Result<(), String> {
+    let pinned_url = tab
+        .pinned
+        .then(|| tab.pinned_url.as_deref().unwrap_or(&tab.url))
+        .and_then(|url| tauri::Url::parse(url).ok())
+        .filter(allowed_destination);
+    {
+        let state = content.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let restored = windows
+            .entries
+            .get_mut(content.window().label())
+            .and_then(|tabs| {
+                tabs.entries
+                    .iter_mut()
+                    .find(|entry| entry.label == content.label())
+            })
+            .ok_or("The restored tab was closed.")?;
+        restored.pinned = pinned_url.is_some();
+        restored.pinned_url = pinned_url;
+    }
     #[cfg(target_os = "macos")]
     if !tab.interaction.is_empty() {
         let bytes = tab.interaction.clone();
@@ -745,6 +767,7 @@ pub fn reorder(app: &AppHandle, window: &str, label: &str, position: usize) -> R
     }
     #[cfg(target_os = "macos")]
     crate::native_toolbar::update_tabs(app, window);
+    crate::browser_data::checkpoint(app);
     Ok(())
 }
 
@@ -763,6 +786,7 @@ pub fn set_pinned(app: &AppHandle, window: &str, label: &str, pinned: bool) -> R
     }
     #[cfg(target_os = "macos")]
     crate::native_toolbar::update_tabs(app, window);
+    crate::browser_data::checkpoint(app);
     Ok(())
 }
 
@@ -779,6 +803,8 @@ mod tests {
                     title: label.into(),
                     pinned,
                     pinned_url: None,
+                    url: String::new(),
+                    interaction: Vec::new(),
                 })
                 .collect(),
             active: "c".into(),
