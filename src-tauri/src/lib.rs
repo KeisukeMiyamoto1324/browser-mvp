@@ -2,6 +2,7 @@
 mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
+mod saved_pages;
 mod tabs;
 
 use std::sync::Mutex;
@@ -441,6 +442,9 @@ pub fn run() {
         })
         .setup(|app| {
             let window = app.get_window("main").ok_or("Main window was not found.")?;
+            app.manage(Mutex::new(saved_pages::Store::load(
+                app.path().app_data_dir()?.join("saved-pages.json"),
+            )?));
             initialize_window(&window)?;
             #[cfg(target_os = "macos")]
             native_toolbar::perform(window.label(), "focus-address");
@@ -468,6 +472,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             resize_content,
+            saved_pages::get_saved_pages,
+            saved_pages::edit_saved_pages,
             navigate,
             browser_navigation
         ])
