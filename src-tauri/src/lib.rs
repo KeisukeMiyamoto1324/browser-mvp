@@ -1,3 +1,4 @@
+mod browser_data;
 #[cfg(target_os = "macos")]
 mod native_tabs;
 #[cfg(target_os = "macos")]
@@ -6,7 +7,7 @@ mod saved_pages;
 mod tabs;
 
 use std::sync::Mutex;
-use tauri::{LogicalPosition, LogicalSize, Manager, Webview};
+use tauri::{Emitter, LogicalPosition, LogicalSize, Manager, Webview};
 
 const TOOLBAR_HEIGHT: f64 = if cfg!(target_os = "macos") { 0.0 } else { 64.0 };
 
@@ -107,6 +108,17 @@ async fn resize_content(webview: Webview, viewport_height: f64) -> Result<(), St
         launch.toolbar_ready = true;
         launch.pending_address.take()
     };
+    let restore = {
+        let state = webview.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        windows
+            .entries
+            .get_mut(webview.window().label())
+            .and_then(|tabs| tabs.pending_restore.take())
+    };
+    if let Some(session) = restore {
+        return restore_window(&webview.window(), session);
+    }
     let address =
         address.unwrap_or_else(|| tauri::Url::parse("about:blank").expect("valid blank URL"));
     if address.as_str() == "about:blank" {
@@ -225,6 +237,197 @@ async fn browser_navigation(
     }
 }
 
+#[tauri::command]
+async fn history_query(
+    webview: Webview,
+    query: String,
+) -> Result<Vec<browser_data::Visit>, String> {
+    browser_content(&webview)?;
+    let state = webview.state::<Mutex<browser_data::Store>>();
+    let store = state.lock().map_err(|error| error.to_string())?;
+    Ok(store.query(&query))
+}
+
+#[tauri::command]
+async fn history_clear(webview: Webview, since: u64) -> Result<(), String> {
+    browser_content(&webview)?;
+    let state = webview.state::<Mutex<browser_data::Store>>();
+    let mut store = state.lock().map_err(|error| error.to_string())?;
+    let previous = store.data.clone();
+    store.data.visits.retain(|visit| visit.visited_at < since);
+    store.data.closed.clear();
+    if let Err(error) = store.save() {
+        store.data = previous;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn history_reopen(webview: Webview, index: Option<usize>) -> Result<(), String> {
+    browser_content(&webview)?;
+    restore_closed_at(
+        webview.app_handle(),
+        webview.window().label(),
+        index.unwrap_or(0),
+    )
+}
+
+#[tauri::command]
+async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWindow>, String> {
+    browser_content(&webview)?;
+    let state = webview.state::<Mutex<browser_data::Store>>();
+    let store = state.lock().map_err(|error| error.to_string())?;
+    Ok(store
+        .data
+        .closed
+        .iter()
+        .rev()
+        .map(|session| browser_data::SessionWindow {
+            tabs: session
+                .tabs
+                .iter()
+                .map(|tab| browser_data::SessionTab {
+                    url: tab.url.clone(),
+                    title: tab.title.clone(),
+                    interaction: Vec::new(),
+                })
+                .collect(),
+            active: session.active,
+            is_window: session.is_window,
+            closed_at: session.closed_at,
+            position: session.position,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn history_visible(webview: Webview, visible: bool) -> Result<(), String> {
+    let content = browser_content(&webview)?;
+    webview
+        .state::<Mutex<tabs::Windows>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .entries
+        .get_mut(webview.window().label())
+        .ok_or("Missing window.")?
+        .local_surface = visible;
+    if visible {
+        webview.set_focus().map_err(|error| error.to_string())?;
+    }
+    if visible {
+        content.hide()
+    } else {
+        content.show()
+    }
+    .map_err(|error| error.to_string())
+}
+
+// ---------------------------------------------------------
+// Restore tab order and selection after the local toolbar mounts.
+// Only validated web addresses and blank tabs can be restored.
+// ---------------------------------------------------------
+fn restore_window(
+    window: &tauri::Window,
+    session: browser_data::SessionWindow,
+) -> Result<(), String> {
+    let app = window.app_handle();
+    let bounds = content_bounds(window, 0.0).map_err(|error| error.to_string())?;
+    let mut labels = Vec::new();
+    for (index, tab) in session.tabs.iter().enumerate() {
+        let Ok(url) = tauri::Url::parse(&tab.url) else {
+            continue;
+        };
+        if url.as_str() != "about:blank" && !is_web_address(&url) {
+            continue;
+        }
+        if index == 0 {
+            let content = tabs::active(app, window.label()).ok_or("Missing restored tab.")?;
+            tabs::restore_document(&content, tab)?;
+            labels.push(content.label().to_string());
+        } else {
+            tabs::create(
+                window,
+                tauri::Url::parse("about:blank").map_err(|error| error.to_string())?,
+                bounds,
+            )?;
+            let content = tabs::active(app, window.label()).ok_or("Missing restored tab.")?;
+            tabs::restore_document(&content, tab)?;
+            labels.push(
+                tabs::active(app, window.label())
+                    .ok_or("Missing restored tab.")?
+                    .label()
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(label) = labels.get(session.active).or_else(|| labels.first()) {
+        tabs::select(app, window.label(), label)?;
+    }
+    browser_data::checkpoint(app);
+    Ok(())
+}
+
+fn restore_closed(app: &tauri::AppHandle, owner: &str) -> Result<(), String> {
+    restore_closed_at(app, owner, 0)
+}
+
+fn restore_closed_at(app: &tauri::AppHandle, owner: &str, index: usize) -> Result<(), String> {
+    let session = app
+        .state::<Mutex<browser_data::Store>>()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .data
+        .closed
+        .iter()
+        .rev()
+        .nth(index)
+        .cloned();
+    let Some(session) = session else {
+        return Ok(());
+    };
+    if !session.is_window && session.tabs.len() == 1 && app.get_window(owner).is_some() {
+        let url = tauri::Url::parse(&session.tabs[0].url).map_err(|error| error.to_string())?;
+        if url.as_str() != "about:blank" && !is_web_address(&url) {
+            return Err("Invalid restored address.".into());
+        }
+        tabs::open(
+            app,
+            owner,
+            tauri::Url::parse("about:blank").map_err(|error| error.to_string())?,
+        )?;
+        let content = tabs::active(app, owner).ok_or("Missing restored tab.")?;
+        tabs::restore_document(&content, &session.tabs[0])?;
+        if let Some(position) = session.position {
+            let state = app.state::<Mutex<tabs::Windows>>();
+            let mut windows = state.lock().map_err(|error| error.to_string())?;
+            let tabs = windows
+                .entries
+                .get_mut(owner)
+                .ok_or("Missing restored window.")?;
+            if let Some(tab) = tabs.entries.pop() {
+                tabs.entries.insert(position.min(tabs.entries.len()), tab);
+            }
+        }
+        browser_data::checkpoint(app);
+    } else {
+        let window = create_window(app, None, None)?;
+        app.state::<Mutex<tabs::Windows>>()
+            .lock()
+            .map_err(|error| error.to_string())?
+            .entries
+            .get_mut(window.label())
+            .ok_or("Missing window.")?
+            .pending_restore = Some(session);
+    }
+    let state = app.state::<Mutex<browser_data::Store>>();
+    let mut store = state.lock().map_err(|error| error.to_string())?;
+    if let Some(position) = store.data.closed.len().checked_sub(index + 1) {
+        store.data.closed.remove(position);
+    }
+    store.save()
+}
+
 // ---------------------------------------------------------
 // Reuse the same native controls when reopening a window.
 // ---------------------------------------------------------
@@ -338,8 +541,22 @@ fn focused_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(tabs::Windows::default()))
+        .manage(Mutex::new(browser_data::Store::default()))
         .menu(|app| {
             let menu = tauri::menu::Menu::default(app)?;
+            let history = tauri::menu::Submenu::with_items(
+                app,
+                "History",
+                true,
+                &[&tauri::menu::MenuItem::with_id(
+                    app,
+                    "show-history",
+                    "Show All History",
+                    true,
+                    Some("CmdOrCtrl+Y"),
+                )?],
+            )?;
+            menu.insert(&history, 4)?;
             #[cfg(target_os = "macos")]
             for item in menu.items()? {
                 let Some(submenu) = item.as_submenu() else {
@@ -418,6 +635,12 @@ pub fn run() {
                 return;
             }
             let window = focused_window(app);
+            if action == "show-history" {
+                if let Some(window) = window {
+                    let _ = window.emit("show-history", ());
+                }
+                return;
+            }
             if action == "close-window" {
                 if let Some(window) = window {
                     let _ = window.close();
@@ -441,13 +664,42 @@ pub fn run() {
             native_toolbar::perform(owner, action);
         })
         .setup(|app| {
+            let path = app.path().app_data_dir()?.join("browser-session.json");
+            let store = browser_data::Store::load(path)?;
+            let sessions = store.data.windows.clone();
+            *app.state::<Mutex<browser_data::Store>>()
+                .lock()
+                .map_err(|error| error.to_string())? = store;
             let window = app.get_window("main").ok_or("Main window was not found.")?;
             app.manage(Mutex::new(saved_pages::Store::load(
                 app.path().app_data_dir()?.join("saved-pages.json"),
             )?));
+            if let Some(session) = sessions.first() {
+                app.state::<Mutex<tabs::Windows>>()
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .entries
+                    .insert(
+                        "main".into(),
+                        tabs::Tabs {
+                            pending_restore: Some(session.clone()),
+                            ..Default::default()
+                        },
+                    );
+            }
             initialize_window(&window)?;
             #[cfg(target_os = "macos")]
             native_toolbar::perform(window.label(), "focus-address");
+            for session in sessions.into_iter().skip(1) {
+                let restored = create_window(app.handle(), None, None)?;
+                app.state::<Mutex<tabs::Windows>>()
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .entries
+                    .get_mut(restored.label())
+                    .ok_or("Missing window.")?
+                    .pending_restore = Some(session);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -457,6 +709,30 @@ pub fn run() {
                 }
                 #[cfg(target_os = "macos")]
                 native_toolbar::sync_menu(window.label());
+            }
+            if matches!(
+                event,
+                tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }
+            ) {
+                tabs::capture(window.app_handle(), window.label());
+                browser_data::checkpoint(window.app_handle());
+            }
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let session =
+                    window
+                        .state::<Mutex<tabs::Windows>>()
+                        .lock()
+                        .ok()
+                        .and_then(|windows| {
+                            windows
+                                .entries
+                                .get(window.label())
+                                .filter(|tabs| tabs.persistent)
+                                .map(browser_data::snapshot)
+                        });
+                if let Some(session) = session {
+                    browser_data::closed(window.app_handle(), session);
+                }
             }
             if let tauri::WindowEvent::Destroyed = event {
                 #[cfg(target_os = "macos")]
@@ -468,6 +744,7 @@ pub fn run() {
                         windows.last_active = windows.entries.keys().min().cloned();
                     }
                 }
+                browser_data::checkpoint(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -475,11 +752,30 @@ pub fn run() {
             saved_pages::get_saved_pages,
             saved_pages::edit_saved_pages,
             navigate,
-            browser_navigation
+            browser_navigation,
+            history_query,
+            history_clear,
+            history_visible,
+            history_reopen,
+            history_recent
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")
         .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code: Some(_), .. } = &event {
+                let labels = app
+                    .state::<Mutex<tabs::Windows>>()
+                    .lock()
+                    .map(|windows| windows.entries.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for label in labels {
+                    tabs::capture(app, &label);
+                }
+                browser_data::checkpoint(app);
+                if let Ok(mut store) = app.state::<Mutex<browser_data::Store>>().lock() {
+                    store.quitting = true;
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::ExitRequested {
                 code: None, api, ..

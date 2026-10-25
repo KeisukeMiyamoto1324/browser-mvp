@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import History from "./History";
 
 type NavigationState = {
   url: string;
@@ -98,10 +99,16 @@ export default function App(): JSX.Element {
     }
   }
 
-  if (navigation.nativeToolbar) return <main />;
+  if (navigation.nativeToolbar)
+    return (
+      <main>
+        <History />
+      </main>
+    );
 
   return (
     <main>
+      <History />
       <nav className="toolbar" aria-label="Browser controls">
         <button
           type="button"

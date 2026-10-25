@@ -6,10 +6,14 @@ use tauri::{AppHandle, Manager, Webview, WebviewUrl, Window};
 pub struct Tab {
     pub label: String,
     pub title: String,
+    pub url: String,
+    pub interaction: Vec<u8>,
 }
 
-#[derive(Default)]
 pub struct Tabs {
+    pub persistent: bool,
+    pub local_surface: bool,
+    pub pending_restore: Option<crate::browser_data::SessionWindow>,
     pub entries: Vec<Tab>,
     pub active: String,
     pub toolbar_ready: bool,
@@ -18,13 +22,28 @@ pub struct Tabs {
     pub(crate) bounds: Option<tauri::Rect>,
 }
 
+impl Default for Tabs {
+    fn default() -> Self {
+        Self {
+            persistent: true,
+            local_surface: false,
+            pending_restore: None,
+            entries: Vec::new(),
+            active: String::new(),
+            toolbar_ready: false,
+            pending_address: None,
+            next_id: 0,
+            bounds: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Windows {
     pub entries: HashMap<String, Tabs>,
     pub last_active: Option<String>,
     pub next_id: u64,
     pub closed_last_window: bool,
-    closed: Vec<tauri::Url>,
 }
 
 impl Windows {
@@ -88,9 +107,41 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
     };
     let handle = app.clone();
     let owner = window.label().to_string();
+    let initial_url = url.to_string();
     let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
         .focused(false)
         .on_navigation(|url| url.as_str() == "about:blank" || crate::is_web_address(url))
+        .on_page_load(|view, payload| {
+            if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                return;
+            }
+            let persistent = {
+                let state = view.state::<Mutex<Windows>>();
+                let Ok(mut windows) = state.lock() else {
+                    return;
+                };
+                let Some(tabs) = windows.entries.get_mut(view.window().label()) else {
+                    return;
+                };
+                let Some(tab) = tabs
+                    .entries
+                    .iter_mut()
+                    .find(|tab| tab.label == view.label())
+                else {
+                    return;
+                };
+                tab.url = payload.url().to_string();
+                (tabs.persistent, tab.title.clone())
+            };
+            if persistent.0 {
+                let state = view.state::<Mutex<crate::browser_data::Store>>();
+                if let Ok(mut store) = state.lock() {
+                    store.record(payload.url().as_str(), &persistent.1);
+                }
+                capture(view.app_handle(), view.window().label());
+                crate::browser_data::checkpoint(view.app_handle());
+            }
+        })
         .on_document_title_changed(|view, title| {
             let state = view.state::<Mutex<Windows>>();
             if let Ok(mut windows) = state.lock()
@@ -100,7 +151,20 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
                     .iter_mut()
                     .find(|tab| tab.label == view.label())
             {
-                tab.title = title;
+                tab.title = title.clone();
+                if tabs.persistent {
+                    let state = view.state::<Mutex<crate::browser_data::Store>>();
+                    if let Ok(mut store) = state.lock()
+                        && let Some(visit) = store
+                            .data
+                            .visits
+                            .iter_mut()
+                            .rev()
+                            .find(|visit| visit.url == tab.url)
+                    {
+                        visit.title = title;
+                    }
+                }
             }
         })
         .on_new_window(move |url, features| {
@@ -145,6 +209,8 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
         tabs.entries.push(Tab {
             label: label.clone(),
             title: String::new(),
+            url: initial_url,
+            interaction: Vec::new(),
         });
     }
     select(app, window.label(), &label)
@@ -166,6 +232,7 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
         }
         tabs.active.clone()
     };
+    capture(app, window);
     content.show().map_err(|error| error.to_string())?;
     if previous != label
         && let Some(old) = app.get_webview(&previous)
@@ -185,6 +252,7 @@ pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> 
     }
     #[cfg(target_os = "macos")]
     crate::native_toolbar::tab_changed(app, window);
+    crate::browser_data::checkpoint(app);
     content.set_focus().map_err(|error| error.to_string())
 }
 
@@ -249,22 +317,7 @@ pub fn perform(app: &AppHandle, window: &str, action: &str) -> Result<(), String
         return Ok(());
     }
     if action == "reopen-tab" {
-        let url = app
-            .state::<Mutex<Windows>>()
-            .lock()
-            .map_err(|error| error.to_string())?
-            .closed
-            .last()
-            .cloned();
-        if let Some(url) = url {
-            open(app, window, url)?;
-            app.state::<Mutex<Windows>>()
-                .lock()
-                .map_err(|error| error.to_string())?
-                .closed
-                .pop();
-        }
-        return Ok(());
+        return crate::restore_closed(app, window);
     }
     if action != "close-tab" {
         return Ok(());
@@ -303,7 +356,9 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
     let content = app
         .get_webview(label)
         .ok_or("The tab is no longer available.")?;
+    capture(app, window);
     let url = current_url(&content)?;
+    let mut closed = None;
     let (index, next, was_active) = {
         let state = app.state::<Mutex<Windows>>();
         let windows = state.lock().map_err(|error| error.to_string())?;
@@ -346,15 +401,29 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
             .entries
             .get_mut(window)
             .ok_or("The window is no longer available.")?;
+        if tabs.persistent {
+            let tab = &tabs.entries[index];
+            closed = Some(crate::browser_data::SessionWindow {
+                tabs: vec![crate::browser_data::SessionTab {
+                    url: url.to_string(),
+                    title: tab.title.clone(),
+                    interaction: tab.interaction.clone(),
+                }],
+                active: 0,
+                is_window: false,
+                closed_at: 0,
+                position: Some(index),
+            });
+        }
         tabs.entries.remove(index);
         if next.is_none() {
             tabs.active.clear();
         }
-        windows.closed.push(url);
-        if windows.closed.len() > 20 {
-            windows.closed.remove(0);
-        }
     }
+    if let Some(session) = closed {
+        crate::browser_data::closed(app, session);
+    }
+    crate::browser_data::checkpoint(app);
     if next.is_none() {
         content
             .window()
@@ -365,4 +434,79 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
         crate::native_toolbar::update_tabs(app, window);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------
+// WebKit owns the opaque navigation and document state.
+// Copy bytes on main without exposing them to page scripts.
+// ---------------------------------------------------------
+pub fn capture(app: &AppHandle, owner: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let labels = app
+            .state::<Mutex<Windows>>()
+            .lock()
+            .ok()
+            .and_then(|windows| {
+                windows
+                    .entries
+                    .get(owner)
+                    .filter(|tabs| tabs.persistent)
+                    .map(|tabs| {
+                        tabs.entries
+                            .iter()
+                            .map(|tab| tab.label.clone())
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default();
+        for label in labels {
+            let Some(content) = app.get_webview(&label) else {
+                continue;
+            };
+            let handle = app.clone();
+            let owner = owner.to_string();
+            let _ = content.with_webview(move |platform| {
+                let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
+                let interaction = unsafe { native.interactionState() }
+                    .and_then(|state| {
+                        state
+                            .downcast_ref::<objc2_foundation::NSData>()
+                            .map(|data| data.to_vec())
+                    })
+                    .unwrap_or_default();
+                let state = handle.state::<Mutex<Windows>>();
+                if let Ok(mut windows) = state.lock()
+                    && let Some(tabs) = windows.entries.get_mut(&owner)
+                    && let Some(tab) = tabs.entries.iter_mut().find(|tab| tab.label == label)
+                {
+                    tab.interaction = interaction;
+                }
+            });
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, owner);
+}
+
+pub fn restore_document(
+    content: &Webview,
+    tab: &crate::browser_data::SessionTab,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if !tab.interaction.is_empty() {
+        let bytes = tab.interaction.clone();
+        return content
+            .with_webview(move |platform| {
+                let native = unsafe { &*platform.inner().cast::<objc2_web_kit::WKWebView>() };
+                let data = objc2_foundation::NSData::from_vec(bytes);
+                unsafe {
+                    native.setInteractionState(Some(&data));
+                }
+            })
+            .map_err(|error| error.to_string());
+    }
+    content
+        .navigate(tauri::Url::parse(&tab.url).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())
 }
