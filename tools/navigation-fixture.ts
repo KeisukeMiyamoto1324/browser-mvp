@@ -33,13 +33,16 @@ createServer((request: IncomingMessage, response: ServerResponse): void => {
 <button onclick="window.open('/window-popup','_blank','width=700,height=500')">Open popup window</button>
 <label>Tab note <input aria-label="Tab note"></label>
 <div style="height:1400px"></div><h2 id="section">Section</h2>`);
-  if (path !== "/slow") {
+  if (path !== "/slow" && path !== "/slow-window") {
     response.end("</body></html>");
     return;
   }
-  const timer = setTimeout((): void => {
-    response.end("<p>Finished</p></body></html>");
-  }, 30000);
+  const timer = setTimeout(
+    (): void => {
+      response.end("<p>Finished</p></body></html>");
+    },
+    path === "/slow-window" ? 120000 : 30000,
+  );
   response.on("close", (): void => {
     clearTimeout(timer);
   });

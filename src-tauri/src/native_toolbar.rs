@@ -391,14 +391,6 @@ pub fn update(state: &NavigationState, window_label: &str) {
                 .setStringValue(&NSString::from_str(&display));
         }
         if controls.loading.replace(Some(state.loading)) != Some(state.loading) {
-            if let Some(item) = controls
-                .handle
-                .menu()
-                .and_then(|menu| menu.get("stop-page"))
-                .and_then(|item| item.as_menuitem().cloned())
-            {
-                let _ = item.set_enabled(state.loading);
-            }
             let (symbol, label) = if state.loading {
                 ("xmark", "Stop loading")
             } else {
@@ -416,6 +408,9 @@ pub fn update(state: &NavigationState, window_label: &str) {
                 .setAccessibilityLabel(Some(&NSString::from_str(label)));
             controls.reload.setToolTip(Some(&NSString::from_str(label)));
         }
+        if controls.window.isKeyWindow() {
+            sync_menu(window_label);
+        }
         controls.progress.setHidden(!state.loading);
         controls.progress.setDoubleValue(state.progress);
         // ---------------------------------------------------------
@@ -429,11 +424,37 @@ pub fn update(state: &NavigationState, window_label: &str) {
     });
 }
 
+// ---------------------------------------------------------
+// App menus are shared; background windows must not set them.
+// Focus changes also synchronize unchanged loading states.
+// ---------------------------------------------------------
+pub fn sync_menu(window_label: &str) {
+    TOOLBAR.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(toolbar) = borrowed.get(window_label) else {
+            return;
+        };
+        let controls = toolbar.ivars();
+        if let Some(menu) = controls.handle.try_state::<crate::BrowserMenu>() {
+            let _ = menu
+                .stop
+                .set_enabled(controls.loading.get().unwrap_or(false));
+        }
+    });
+}
+
 pub fn remove(window_label: &str) {
     crate::native_tabs::remove(window_label);
-    TOOLBAR.with(|slot| {
-        slot.borrow_mut().remove(window_label);
+    let last = TOOLBAR.with(|slot| {
+        let mut toolbars = slot.borrow_mut();
+        let removed = toolbars.remove(window_label);
+        if toolbars.is_empty() { removed } else { None }
     });
+    if let Some(toolbar) = last
+        && let Some(menu) = toolbar.ivars().handle.try_state::<crate::BrowserMenu>()
+    {
+        let _ = menu.stop.set_enabled(false);
+    }
 }
 
 // ---------------------------------------------------------

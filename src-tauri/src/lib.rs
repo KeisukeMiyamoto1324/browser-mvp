@@ -9,6 +9,11 @@ use tauri::{LogicalPosition, LogicalSize, Manager, Webview};
 
 const TOOLBAR_HEIGHT: f64 = if cfg!(target_os = "macos") { 0.0 } else { 64.0 };
 
+#[cfg(target_os = "macos")]
+struct BrowserMenu {
+    stop: tauri::menu::MenuItem<tauri::Wry>,
+}
+
 // ---------------------------------------------------------
 // Accept only web URLs without changing their destination.
 // ---------------------------------------------------------
@@ -388,13 +393,15 @@ pub fn run() {
                             true,
                             Some("CmdOrCtrl+R"),
                         )?)?;
-                        submenu.prepend(&tauri::menu::MenuItem::with_id(
+                        let stop = tauri::menu::MenuItem::with_id(
                             app,
                             "stop-page",
                             "Stop",
-                            true,
+                            false,
                             Some("CmdOrCtrl+."),
-                        )?)?;
+                        )?;
+                        submenu.prepend(&stop)?;
+                        app.manage(BrowserMenu { stop });
                     }
                     _ => {}
                 }
@@ -440,10 +447,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(true) = event
-                && let Ok(mut windows) = window.state::<Mutex<tabs::Windows>>().lock()
-            {
-                windows.last_active = Some(window.label().to_string());
+            if let tauri::WindowEvent::Focused(true) = event {
+                if let Ok(mut windows) = window.state::<Mutex<tabs::Windows>>().lock() {
+                    windows.last_active = Some(window.label().to_string());
+                }
+                #[cfg(target_os = "macos")]
+                native_toolbar::sync_menu(window.label());
             }
             if let tauri::WindowEvent::Destroyed = event {
                 #[cfg(target_os = "macos")]
