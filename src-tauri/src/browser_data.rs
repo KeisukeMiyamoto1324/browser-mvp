@@ -16,6 +16,10 @@ pub struct Visit {
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct SessionTab {
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub pinned_url: Option<String>,
     pub url: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,6 +222,8 @@ pub fn snapshot(tabs: &crate::tabs::Tabs) -> SessionWindow {
                 url: tab.url.clone(),
                 title: tab.title.clone(),
                 interaction: tab.interaction.clone(),
+                pinned: tab.pinned,
+                pinned_url: tab.pinned_url.as_ref().map(ToString::to_string),
             })
             .collect(),
         active: tabs
@@ -294,11 +300,14 @@ mod tests {
                     url: "https://example.com/a".into(),
                     title: "Document".into(),
                     interaction: vec![1, 2, 3],
+                    pinned: true,
+                    pinned_url: Some("https://example.com/a".into()),
                 },
                 SessionTab {
                     url: "about:blank".into(),
                     title: String::new(),
                     interaction: Vec::new(),
+                    ..Default::default()
                 },
             ],
             active: 1,
@@ -332,6 +341,11 @@ mod tests {
         assert_eq!(reloaded.data.closed[0].id, restored.data.closed[0].id);
         assert_eq!(restored.data.windows[0].active, 1);
         assert_eq!(restored.data.windows[0].tabs.len(), 2);
+        assert!(restored.data.windows[0].tabs[0].pinned);
+        assert_eq!(
+            restored.data.windows[0].tabs[0].pinned_url.as_deref(),
+            Some("https://example.com/a")
+        );
         assert_eq!(restored.query("RUST").len(), 1);
         assert_eq!(restored.query("日本語").len(), 1);
         assert_eq!(restored.query("").len(), 1);
@@ -346,6 +360,8 @@ mod tests {
             title: "Document".into(),
             url: "https://example.com/".into(),
             interaction: vec![9],
+            pinned: true,
+            pinned_url: Some(tauri::Url::parse("https://example.com/").unwrap()),
         };
         let mut windows = crate::tabs::Windows::default();
         windows.entries.insert(
@@ -367,6 +383,11 @@ mod tests {
         let restored = sessions(&windows);
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].tabs[0].interaction, vec![9]);
+        assert!(restored[0].tabs[0].pinned);
+        assert_eq!(
+            restored[0].tabs[0].pinned_url.as_deref(),
+            Some("https://example.com/")
+        );
         assert_eq!(restored[0].active, 0);
     }
 
@@ -377,6 +398,7 @@ mod tests {
                 url: "https://example.com/document".into(),
                 title: "Saved document".into(),
                 interaction: vec![1, 7, 9],
+                ..Default::default()
             }],
             ..Default::default()
         };

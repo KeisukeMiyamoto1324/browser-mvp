@@ -8,6 +8,8 @@ pub struct Tab {
     pub title: String,
     pub url: String,
     pub interaction: Vec<u8>,
+    pub pinned: bool,
+    pub pinned_url: Option<tauri::Url>,
 }
 
 pub struct Tabs {
@@ -148,6 +150,8 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
             );
         })
         .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::native_tab_navigation::install(&content, window.label())?;
     content.hide().map_err(|error| error.to_string())?;
     {
         let state = app.state::<Mutex<Windows>>();
@@ -162,6 +166,8 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
             title: String::new(),
             url: initial_url,
             interaction: Vec::new(),
+            pinned: false,
+            pinned_url: None,
         });
     }
     select(app, window.label(), &label)?;
@@ -470,6 +476,8 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
         select(app, window, next)?;
     }
     content.close().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    crate::native_tab_navigation::remove(label);
     {
         let state = app.state::<Mutex<Windows>>();
         let mut windows = state.lock().map_err(|error| error.to_string())?;
@@ -485,6 +493,8 @@ pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), Strin
                     url: url.to_string(),
                     title: tab.title.clone(),
                     interaction: tab.interaction.clone(),
+                    pinned: tab.pinned,
+                    pinned_url: tab.pinned_url.as_ref().map(ToString::to_string),
                 }],
                 active: 0,
                 is_window: false,
@@ -591,6 +601,26 @@ pub fn restore_document(
     content: &Webview,
     tab: &crate::browser_data::SessionTab,
 ) -> Result<(), String> {
+    let pinned_url = tab
+        .pinned
+        .then(|| tab.pinned_url.as_deref().unwrap_or(&tab.url))
+        .and_then(|url| tauri::Url::parse(url).ok())
+        .filter(allowed_destination);
+    {
+        let state = content.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let restored = windows
+            .entries
+            .get_mut(content.window().label())
+            .and_then(|tabs| {
+                tabs.entries
+                    .iter_mut()
+                    .find(|entry| entry.label == content.label())
+            })
+            .ok_or("The restored tab was closed.")?;
+        restored.pinned = pinned_url.is_some();
+        restored.pinned_url = pinned_url;
+    }
     #[cfg(target_os = "macos")]
     if !tab.interaction.is_empty() {
         let bytes = tab.interaction.clone();
@@ -629,4 +659,206 @@ pub fn restore_document(
     restored.title = tab.title.clone();
     restored.interaction = tab.interaction.clone();
     Ok(())
+}
+
+// ---------------------------------------------------------
+// The native delegate calls this only for top-level frames.
+// Leave subframe navigation with the existing WebKit policy.
+// ---------------------------------------------------------
+pub(crate) fn divert_pinned_navigation(
+    app: &AppHandle,
+    owner: &str,
+    label: &str,
+    url: &tauri::Url,
+) -> bool {
+    if !crate::is_web_address(url) {
+        return false;
+    }
+    let external = app
+        .state::<Mutex<Windows>>()
+        .lock()
+        .ok()
+        .and_then(|windows| {
+            windows
+                .entries
+                .get(owner)
+                .and_then(|tabs| tabs.entries.iter().find(|tab| tab.label == label))
+                .and_then(|tab| tab.pinned_url.as_ref())
+                .map(|destination| leaves_pinned_site(destination, url))
+        })
+        .unwrap_or(false);
+    if !external {
+        return false;
+    }
+    let handle = app.clone();
+    let owner = owner.to_string();
+    let destination = url.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(error) = open(&handle, &owner, destination) {
+            eprintln!("Could not open pinned-tab link: {error}");
+        }
+    });
+    true
+}
+
+// ---------------------------------------------------------
+// Preserve a pinned destination when navigation leaves its
+// website. Fragments and paths remain in the pinned view.
+// ---------------------------------------------------------
+fn leaves_pinned_site(destination: &tauri::Url, target: &tauri::Url) -> bool {
+    let host = |url: &tauri::Url| {
+        url.host_str()
+            .unwrap_or("")
+            .trim_start_matches("www.")
+            .to_string()
+    };
+    host(destination) != host(target)
+}
+
+impl Tabs {
+    pub fn set_pinned(
+        &mut self,
+        label: &str,
+        destination: Option<tauri::Url>,
+    ) -> Result<(), String> {
+        let index = self
+            .entries
+            .iter()
+            .position(|tab| tab.label == label)
+            .ok_or("Unknown tab.")?;
+        let mut tab = self.entries.remove(index);
+        tab.pinned = destination.is_some();
+        tab.pinned_url = destination;
+        let boundary = self.entries.iter().take_while(|tab| tab.pinned).count();
+        self.entries.insert(boundary, tab);
+        Ok(())
+    }
+
+    pub fn reorder(&mut self, label: &str, position: usize) -> Result<(), String> {
+        let source = self
+            .entries
+            .iter()
+            .position(|tab| tab.label == label)
+            .ok_or("Unknown tab.")?;
+        let pinned_count = self.entries.iter().take_while(|tab| tab.pinned).count();
+        let pinned = self.entries[source].pinned;
+        let minimum = if pinned { 0 } else { pinned_count };
+        let maximum = if pinned {
+            pinned_count - 1
+        } else {
+            self.entries.len() - 1
+        };
+        let target = position.clamp(minimum, maximum);
+        let tab = self.entries.remove(source);
+        self.entries.insert(target, tab);
+        Ok(())
+    }
+}
+
+pub fn reorder(app: &AppHandle, window: &str, label: &str, position: usize) -> Result<(), String> {
+    {
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        windows
+            .entries
+            .get_mut(window)
+            .ok_or("Unknown window.")?
+            .reorder(label, position)?;
+    }
+    #[cfg(target_os = "macos")]
+    crate::native_toolbar::update_tabs(app, window);
+    crate::browser_data::checkpoint(app);
+    Ok(())
+}
+
+pub fn set_pinned(app: &AppHandle, window: &str, label: &str, pinned: bool) -> Result<(), String> {
+    let content = app.get_webview(label).ok_or("Unknown tab.")?;
+    let destination = if pinned {
+        Some(current_url(&content)?)
+    } else {
+        None
+    };
+    {
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows.entries.get_mut(window).ok_or("Unknown window.")?;
+        tabs.set_pinned(label, destination)?;
+    }
+    #[cfg(target_os = "macos")]
+    crate::native_toolbar::update_tabs(app, window);
+    crate::browser_data::checkpoint(app);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tabs() -> Tabs {
+        Tabs {
+            entries: [("a", true), ("b", true), ("c", false), ("d", false)]
+                .into_iter()
+                .map(|(label, pinned)| Tab {
+                    label: label.into(),
+                    title: label.into(),
+                    pinned,
+                    pinned_url: None,
+                    url: String::new(),
+                    interaction: Vec::new(),
+                })
+                .collect(),
+            active: "c".into(),
+            ..Tabs::default()
+        }
+    }
+
+    #[test]
+    fn reorder_preserves_groups_selection_and_labels() {
+        let mut tabs = tabs();
+        tabs.reorder("d", 0).unwrap();
+        tabs.reorder("a", 99).unwrap();
+        assert_eq!(
+            tabs.entries
+                .iter()
+                .map(|tab| tab.label.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a", "d", "c"]
+        );
+        assert_eq!(tabs.active, "c");
+        assert!(tabs.reorder("unknown", 0).is_err());
+        assert_eq!(tabs.entries.len(), 4);
+    }
+
+    #[test]
+    fn pin_and_unpin_keep_selection_and_destination() {
+        let mut tabs = tabs();
+        let destination = tauri::Url::parse("https://example.com/start").unwrap();
+        tabs.set_pinned("d", Some(destination.clone())).unwrap();
+        assert_eq!(tabs.entries[2].label, "d");
+        assert_eq!(tabs.entries[2].pinned_url.as_ref(), Some(&destination));
+        tabs.set_pinned("a", None).unwrap();
+        assert_eq!(
+            tabs.entries
+                .iter()
+                .map(|tab| tab.label.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "d", "a", "c"]
+        );
+        assert!(!tabs.entries[2].pinned);
+        assert!(tabs.entries[2].pinned_url.is_none());
+        assert_eq!(tabs.active, "c");
+    }
+
+    #[test]
+    fn pinned_site_keeps_paths_and_diverts_other_sites() {
+        let destination = tauri::Url::parse("https://example.com/start").unwrap();
+        assert!(!leaves_pinned_site(
+            &destination,
+            &tauri::Url::parse("https://www.example.com/next#section").unwrap()
+        ));
+        assert!(leaves_pinned_site(
+            &destination,
+            &tauri::Url::parse("https://other.example/").unwrap()
+        ));
+    }
 }

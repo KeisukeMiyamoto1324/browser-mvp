@@ -2,6 +2,8 @@ mod browser_data;
 #[cfg(target_os = "macos")]
 mod native_popup;
 #[cfg(target_os = "macos")]
+mod native_tab_navigation;
+#[cfg(target_os = "macos")]
 mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
@@ -323,6 +325,8 @@ async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWin
                     url: tab.url.clone(),
                     title: tab.title.clone(),
                     interaction: Vec::new(),
+                    pinned: tab.pinned,
+                    pinned_url: tab.pinned_url.clone(),
                 })
                 .collect(),
             active: session.active,
@@ -436,10 +440,10 @@ fn restore_window(
         if url.as_str() != "about:blank" && !is_web_address(&url) {
             continue;
         }
-        if index == 0 {
+        if labels.is_empty() {
             let content = tabs::active(app, window.label()).ok_or("Missing restored tab.")?;
             tabs::restore_document(&content, tab)?;
-            labels.push(content.label().to_string());
+            labels.push((index, content.label().to_string()));
         } else {
             tabs::create(
                 window,
@@ -448,15 +452,23 @@ fn restore_window(
             )?;
             let content = tabs::active(app, window.label()).ok_or("Missing restored tab.")?;
             tabs::restore_document(&content, tab)?;
-            labels.push(
-                tabs::active(app, window.label())
-                    .ok_or("Missing restored tab.")?
-                    .label()
-                    .to_string(),
-            );
+            labels.push((index, content.label().to_string()));
         }
     }
-    if let Some(label) = labels.get(session.active).or_else(|| labels.first()) {
+    {
+        let state = app.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window.label())
+            .ok_or("Missing restored window.")?;
+        tabs.entries.sort_by_key(|tab| !tab.pinned);
+    }
+    if let Some((_, label)) = labels
+        .iter()
+        .find(|(index, _)| *index == session.active)
+        .or_else(|| labels.first())
+    {
         tabs::select(app, window.label(), label)?;
     }
     app.state::<Mutex<tabs::Windows>>()
@@ -511,7 +523,7 @@ fn restore_closed_id(app: &tauri::AppHandle, owner: &str, id: &str) -> Result<()
         )?;
         let content = tabs::active(app, owner).ok_or("Missing restored tab.")?;
         tabs::restore_document(&content, &session.tabs[0])?;
-        if let Some(position) = session.position {
+        {
             let state = app.state::<Mutex<tabs::Windows>>();
             let mut windows = state.lock().map_err(|error| error.to_string())?;
             let tabs = windows
@@ -519,7 +531,15 @@ fn restore_closed_id(app: &tauri::AppHandle, owner: &str, id: &str) -> Result<()
                 .get_mut(owner)
                 .ok_or("Missing restored window.")?;
             if let Some(tab) = tabs.entries.pop() {
-                tabs.entries.insert(position.min(tabs.entries.len()), tab);
+                let boundary = tabs.entries.iter().take_while(|entry| entry.pinned).count();
+                let minimum = if tab.pinned { 0 } else { boundary };
+                let maximum = if tab.pinned {
+                    boundary
+                } else {
+                    tabs.entries.len()
+                };
+                let position = session.position.unwrap_or(maximum).clamp(minimum, maximum);
+                tabs.entries.insert(position, tab);
             }
         }
         browser_data::checkpoint(app);
@@ -669,6 +689,8 @@ fn create_popup(
                     title: String::new(),
                     url: "about:blank".into(),
                     interaction: Vec::new(),
+                    pinned: false,
+                    pinned_url: None,
                 }],
                 ..Default::default()
             },
@@ -700,6 +722,7 @@ fn create_popup(
                 .ok_or("The popup window is not ready.")?;
             native_toolbar::install(&owner).map_err(|error| error.to_string())?;
             native_popup::install(&popup).map_err(|error| error.to_string())?;
+            native_tab_navigation::install(popup.as_ref(), &label)?;
         }
         let _ = app.emit("tabs-changed", ());
         Ok(popup)
@@ -792,6 +815,8 @@ pub fn run() {
             )?;
             menu.insert(&history, 4)?;
             #[cfg(target_os = "macos")]
+            let mut stop_item = None;
+            #[cfg(target_os = "macos")]
             for item in menu.items()? {
                 let Some(submenu) = item.as_submenu() else {
                     continue;
@@ -830,13 +855,14 @@ pub fn run() {
                             ("next-tab", "Show Next Tab", "Ctrl+Tab"),
                             ("previous-tab", "Show Previous Tab", "Ctrl+Shift+Tab"),
                         ] {
-                            submenu.append(&tauri::menu::MenuItem::with_id(
+                            let item = tauri::menu::MenuItem::with_id(
                                 app,
                                 id,
                                 label,
                                 true,
                                 Some(shortcut),
-                            )?)?;
+                            )?;
+                            submenu.append(&item)?;
                         }
                         submenu.prepend(&tauri::menu::MenuItem::with_id(
                             app,
@@ -853,9 +879,15 @@ pub fn run() {
                             Some("CmdOrCtrl+."),
                         )?;
                         submenu.prepend(&stop)?;
-                        app.manage(BrowserMenu { stop });
+                        stop_item = Some(stop);
                     }
                     _ => {}
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(stop) = stop_item {
+                    app.manage(BrowserMenu { stop });
                 }
             }
             Ok(menu)
@@ -1013,7 +1045,7 @@ pub fn run() {
             history_recent,
             start_page::get_start_page,
             start_page::set_start_page,
-            start_page::select_suggested_tab
+            start_page::select_suggested_tab,
         ])
         .build(tauri::generate_context!())
         .expect("error while building browser")
