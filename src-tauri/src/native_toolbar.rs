@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -13,7 +14,7 @@ use tauri::Manager;
 use crate::NavigationState;
 
 thread_local! {
-    static TOOLBAR: RefCell<Option<Retained<BrowserToolbar>>> = const { RefCell::new(None) };
+    static TOOLBAR: RefCell<HashMap<String, Retained<BrowserToolbar>>> = RefCell::new(HashMap::new());
 }
 
 struct AddressState {
@@ -63,6 +64,7 @@ define_class!(
 struct ToolbarControls {
     window: Retained<NSWindow>,
     handle: tauri::AppHandle,
+    window_label: String,
     history: Retained<NSSegmentedControl>,
     address: Retained<AddressField>,
     reload: Retained<NSButton>,
@@ -127,7 +129,7 @@ define_class!(
                 unsafe { _editor.selectAll(None); }
             } else {
                 controls.window.makeFirstResponder(None);
-                if let Some(content) = crate::tabs::active(&controls.handle) {
+                if let Some(content) = crate::tabs::active(&controls.handle, &controls.window_label) {
                     let _ = content.set_focus();
                 }
             }
@@ -143,7 +145,7 @@ define_class!(
             let controls = self.ivars();
             let address = controls.address.stringValue().to_string();
             let result = crate::resolve_address(&address).and_then(|url| {
-                crate::tabs::active(&controls.handle).ok_or_else(|| String::from("The browser WebView is not ready."))?
+                crate::tabs::active(&controls.handle, &controls.window_label).ok_or_else(|| String::from("The browser WebView is not ready."))?
                     .navigate(url).map_err(|error| error.to_string())
             });
             if let Err(error) = result {
@@ -154,22 +156,22 @@ define_class!(
                 return;
             }
             if let Some(window) = controls.address.window() { window.makeFirstResponder(None); }
-            if let Some(content) = crate::tabs::active(&controls.handle) { let _ = content.set_focus(); }
+            if let Some(content) = crate::tabs::active(&controls.handle, &controls.window_label) { let _ = content.set_focus(); }
         }
 
         #[unsafe(method(navigateHistory:))]
         fn navigate_history(&self, sender: &NSSegmentedControl) {
-            perform(if sender.selectedSegment() == 0 { "back" } else { "forward" });
+            perform(&self.ivars().window_label, if sender.selectedSegment() == 0 { "back" } else { "forward" });
         }
 
         #[unsafe(method(newTab:))]
         fn new_tab(&self, _sender: &NSObject) {
-            if let Err(error) = crate::tabs::perform(&self.ivars().handle, "new-tab") { eprintln!("Could not create tab: {error}"); }
+            if let Err(error) = crate::tabs::perform(&self.ivars().handle, &self.ivars().window_label, "new-tab") { eprintln!("Could not create tab: {error}"); }
         }
 
         #[unsafe(method(reloadOrStop:))]
         fn reload_or_stop(&self, _sender: &NSButton) {
-            perform("reload-or-stop");
+            perform(&self.ivars().window_label, "reload-or-stop");
         }
     }
 );
@@ -302,6 +304,7 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
         window: native.clone(),
         handle: window.app_handle().clone(),
+        window_label: window.label().to_string(),
         history,
         address,
         reload,
@@ -332,13 +335,15 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
     toolbar.setCenteredItemIdentifiers(&NSSet::from_slice(&[ns_string!("address")]));
     toolbar.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    native.setTabbingMode(NSWindowTabbingMode::Disallowed);
     native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     native.setToolbarStyle(NSWindowToolbarStyle::Unified);
     native.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
     native.setToolbar(Some(&toolbar));
     toolbar.setVisible(true);
     TOOLBAR.with(|slot| {
-        *slot.borrow_mut() = Some(delegate);
+        slot.borrow_mut()
+            .insert(window.label().to_string(), delegate);
     });
     crate::native_tabs::install(window)?;
     Ok(())
@@ -348,13 +353,21 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
 // Synchronize controls without changing an active text edit.
 // Native properties also cover fragment and failed loads.
 // ---------------------------------------------------------
-pub fn update(state: &NavigationState) {
+pub fn update(state: &NavigationState, window_label: &str) {
     TOOLBAR.with(|slot| {
         let borrowed = slot.borrow();
-        let Some(toolbar) = borrowed.as_ref() else {
+        let Some(toolbar) = borrowed.get(window_label) else {
             return;
         };
         let controls = toolbar.ivars();
+        let title = if state.title.is_empty() {
+            "New Tab"
+        } else {
+            &state.title
+        };
+        if controls.window.title().to_string() != title {
+            controls.window.setTitle(&NSString::from_str(title));
+        }
         controls.history.setEnabled_forSegment(state.can_go_back, 0);
         controls
             .history
@@ -378,14 +391,6 @@ pub fn update(state: &NavigationState) {
                 .setStringValue(&NSString::from_str(&display));
         }
         if controls.loading.replace(Some(state.loading)) != Some(state.loading) {
-            if let Some(item) = controls
-                .handle
-                .menu()
-                .and_then(|menu| menu.get("stop-page"))
-                .and_then(|item| item.as_menuitem().cloned())
-            {
-                let _ = item.set_enabled(state.loading);
-            }
             let (symbol, label) = if state.loading {
                 ("xmark", "Stop loading")
             } else {
@@ -403,6 +408,9 @@ pub fn update(state: &NavigationState) {
                 .setAccessibilityLabel(Some(&NSString::from_str(label)));
             controls.reload.setToolTip(Some(&NSString::from_str(label)));
         }
+        if controls.window.isKeyWindow() {
+            sync_menu(window_label);
+        }
         controls.progress.setHidden(!state.loading);
         controls.progress.setDoubleValue(state.progress);
         // ---------------------------------------------------------
@@ -416,20 +424,46 @@ pub fn update(state: &NavigationState) {
     });
 }
 
-pub fn remove() {
-    crate::native_tabs::remove();
+// ---------------------------------------------------------
+// App menus are shared; background windows must not set them.
+// Focus changes also synchronize unchanged loading states.
+// ---------------------------------------------------------
+pub fn sync_menu(window_label: &str) {
     TOOLBAR.with(|slot| {
-        slot.borrow_mut().take();
+        let borrowed = slot.borrow();
+        let Some(toolbar) = borrowed.get(window_label) else {
+            return;
+        };
+        let controls = toolbar.ivars();
+        if let Some(menu) = controls.handle.try_state::<crate::BrowserMenu>() {
+            let _ = menu
+                .stop
+                .set_enabled(controls.loading.get().unwrap_or(false));
+        }
     });
+}
+
+pub fn remove(window_label: &str) {
+    crate::native_tabs::remove(window_label);
+    let last = TOOLBAR.with(|slot| {
+        let mut toolbars = slot.borrow_mut();
+        let removed = toolbars.remove(window_label);
+        if toolbars.is_empty() { removed } else { None }
+    });
+    if let Some(toolbar) = last
+        && let Some(menu) = toolbar.ivars().handle.try_state::<crate::BrowserMenu>()
+    {
+        let _ = menu.stop.set_enabled(false);
+    }
 }
 
 // ---------------------------------------------------------
 // Handle shortcuts even when web content owns keyboard focus.
 // ---------------------------------------------------------
-pub fn perform(action: &str) {
+pub fn perform(window_label: &str, action: &str) {
     TOOLBAR.with(|slot| {
         let borrowed = slot.borrow();
-        let Some(toolbar) = borrowed.as_ref() else {
+        let Some(toolbar) = borrowed.get(window_label) else {
             return;
         };
         let controls = toolbar.ivars();
@@ -449,7 +483,7 @@ pub fn perform(action: &str) {
             }
             return;
         }
-        let Some(content) = crate::tabs::active(&controls.handle) else {
+        let Some(content) = crate::tabs::active(&controls.handle, &controls.window_label) else {
             return;
         };
         let action = action.to_string();
@@ -477,15 +511,15 @@ pub fn perform(action: &str) {
 // End the old tab's edit before displaying the new address.
 // The next native poll supplies its history and load state.
 // ---------------------------------------------------------
-pub fn tab_changed(app: &tauri::AppHandle) {
+pub fn tab_changed(app: &tauri::AppHandle, window_label: &str) {
     TOOLBAR.with(|slot| {
         let borrowed = slot.borrow();
-        let Some(toolbar) = borrowed.as_ref() else {
+        let Some(toolbar) = borrowed.get(window_label) else {
             return;
         };
         let controls = toolbar.ivars();
         controls.window.makeFirstResponder(None);
-        let url = crate::tabs::active(app)
+        let url = crate::tabs::active(app, window_label)
             .and_then(|content| crate::tabs::current_url(&content).ok())
             .map(|url| url.to_string())
             .unwrap_or_default();
@@ -502,9 +536,9 @@ pub fn tab_changed(app: &tauri::AppHandle) {
         controls.history.setEnabled_forSegment(false, 1);
         controls.progress.setHidden(true);
     });
-    update_tabs(app);
+    update_tabs(app, window_label);
 }
 
-pub fn update_tabs(app: &tauri::AppHandle) {
-    crate::native_tabs::update(app);
+pub fn update_tabs(app: &tauri::AppHandle, window_label: &str) {
+    crate::native_tabs::update(app, window_label);
 }

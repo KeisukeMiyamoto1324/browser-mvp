@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview, WebviewUrl, Window};
 
@@ -11,24 +12,51 @@ pub struct Tab {
 pub struct Tabs {
     pub entries: Vec<Tab>,
     pub active: String,
-    next_id: u64,
+    pub toolbar_ready: bool,
+    pub pending_address: Option<tauri::Url>,
+    pub(crate) next_id: u64,
+    pub(crate) bounds: Option<tauri::Rect>,
+}
+
+#[derive(Default)]
+pub struct Windows {
+    pub entries: HashMap<String, Tabs>,
+    pub last_active: Option<String>,
+    pub next_id: u64,
+    pub closed_last_window: bool,
     closed: Vec<tauri::Url>,
-    bounds: Option<tauri::Rect>,
+}
+
+impl Windows {
+    pub fn owns_toolbar(&self, label: &str, window: &str) -> bool {
+        label == window && self.entries.contains_key(window)
+    }
 }
 
 // ---------------------------------------------------------
-// Keep labels unique after closing and reopening tabs.
-// Each WebView retains its own document and navigation stack.
+// Resolve content within its owning window, never by focus.
+// Native menu routing supplies the foreground window label.
 // ---------------------------------------------------------
-pub fn active(app: &AppHandle) -> Option<Webview> {
-    let label = app.state::<Mutex<Tabs>>().lock().ok()?.active.clone();
+pub fn active(app: &AppHandle, window: &str) -> Option<Webview> {
+    let label = app
+        .state::<Mutex<Windows>>()
+        .lock()
+        .ok()?
+        .entries
+        .get(window)?
+        .active
+        .clone();
     app.get_webview(&label)
 }
 
-pub fn resize(app: &AppHandle, bounds: tauri::Rect) -> Result<(), String> {
+pub fn resize(app: &AppHandle, window: &str, bounds: tauri::Rect) -> Result<(), String> {
     let entries = {
-        let state = app.state::<Mutex<Tabs>>();
-        let mut tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window)
+            .ok_or("The window is no longer available.")?;
         tabs.bounds = Some(bounds);
         tabs.entries.clone()
     };
@@ -42,21 +70,31 @@ pub fn resize(app: &AppHandle, bounds: tauri::Rect) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------
+// Keep WebView labels unique across windows and closed tabs.
+// Each view retains its own document and navigation stack.
+// ---------------------------------------------------------
 pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(), String> {
     let app = window.app_handle();
     let label = {
-        let state = app.state::<Mutex<Tabs>>();
-        let mut tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window.label())
+            .ok_or("The window is no longer available.")?;
         tabs.next_id += 1;
-        format!("content-{}", tabs.next_id)
+        format!("content-{}-{}", window.label(), tabs.next_id)
     };
     let handle = app.clone();
+    let owner = window.label().to_string();
     let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(url))
         .focused(false)
         .on_navigation(|url| url.as_str() == "about:blank" || crate::is_web_address(url))
         .on_document_title_changed(|view, title| {
-            let state = view.state::<Mutex<Tabs>>();
-            if let Ok(mut tabs) = state.lock()
+            let state = view.state::<Mutex<Windows>>();
+            if let Ok(mut windows) = state.lock()
+                && let Some(tabs) = windows.entries.get_mut(view.window().label())
                 && let Some(tab) = tabs
                     .entries
                     .iter_mut()
@@ -65,14 +103,16 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
                 tab.title = title;
             }
         })
-        .on_new_window(move |url, _features| {
+        .on_new_window(move |url, features| {
             if crate::is_web_address(&url) {
-                let queued = handle.clone();
-                let _ = handle.run_on_main_thread(move || {
-                    if let Err(error) = open(&queued, url) {
-                        eprintln!("Could not open tab: {error}");
-                    }
-                });
+                let result = if features.size().is_some() || features.position().is_some() {
+                    crate::create_window(&handle, Some(url), Some(features)).map(|_| ())
+                } else {
+                    open(&handle, &owner, url).map(|_| ())
+                };
+                if let Err(error) = result {
+                    eprintln!("Could not open web address: {error}");
+                }
             }
             tauri::webview::NewWindowResponse::Deny
         });
@@ -95,24 +135,32 @@ pub fn create(window: &Window, url: tauri::Url, bounds: tauri::Rect) -> Result<(
         .map_err(|error| error.to_string())?;
     content.hide().map_err(|error| error.to_string())?;
     {
-        let state = app.state::<Mutex<Tabs>>();
-        let mut tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window.label())
+            .ok_or("The window is no longer available.")?;
         tabs.bounds = Some(bounds);
         tabs.entries.push(Tab {
             label: label.clone(),
             title: String::new(),
         });
     }
-    select(app, &label)
+    select(app, window.label(), &label)
 }
 
-pub fn select(app: &AppHandle, label: &str) -> Result<(), String> {
+pub fn select(app: &AppHandle, window: &str, label: &str) -> Result<(), String> {
     let content = app
         .get_webview(label)
         .ok_or("The tab is no longer available.")?;
     let previous = {
-        let state = app.state::<Mutex<Tabs>>();
-        let tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get(window)
+            .ok_or("The window is no longer available.")?;
         if !tabs.entries.iter().any(|tab| tab.label == label) {
             return Err("Unknown tab.".into());
         }
@@ -126,66 +174,55 @@ pub fn select(app: &AppHandle, label: &str) -> Result<(), String> {
         let _ = content.hide();
         return Err(error.to_string());
     }
-    app.state::<Mutex<Tabs>>()
-        .lock()
-        .map_err(|error| error.to_string())?
-        .active = label.into();
+    {
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        windows
+            .entries
+            .get_mut(window)
+            .ok_or("The window is no longer available.")?
+            .active = label.into();
+    }
     #[cfg(target_os = "macos")]
-    crate::native_toolbar::tab_changed(app);
+    crate::native_toolbar::tab_changed(app, window);
     content.set_focus().map_err(|error| error.to_string())
 }
 
-pub fn open(app: &AppHandle, url: tauri::Url) -> Result<(), String> {
-    if app.get_window("main").is_none() {
-        {
-            let state = app.state::<Mutex<crate::BrowserLaunch>>();
-            let mut launch = state.lock().map_err(|error| error.to_string())?;
-            launch.toolbar_ready = false;
-            launch.pending_address = Some(url);
-        }
-        let config = app
-            .config()
-            .app
-            .windows
-            .first()
-            .ok_or("The window configuration is missing.")?;
-        tauri::WebviewWindowBuilder::from_config(app, config)
-            .map_err(|error| error.to_string())?
-            .build()
-            .map_err(|error| error.to_string())?;
-        let window = app
-            .get_window("main")
-            .ok_or("The window is no longer available.")?;
-        crate::initialize_window(&window).map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    let window = app
-        .get_window("main")
-        .ok_or("The window is no longer available.")?;
+pub fn open(app: &AppHandle, owner: &str, url: tauri::Url) -> Result<Window, String> {
+    let Some(window) = app.get_window(owner) else {
+        return crate::create_window(app, Some(url), None);
+    };
     window.unminimize().map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
-    let bounds = if let Some(content) = active(app) {
+    let bounds = if let Some(content) = active(app, owner) {
         content.bounds().map_err(|error| error.to_string())?
     } else {
-        app.state::<Mutex<Tabs>>()
+        app.state::<Mutex<Windows>>()
             .lock()
             .map_err(|error| error.to_string())?
-            .bounds
+            .entries
+            .get(owner)
+            .and_then(|tabs| tabs.bounds)
             .ok_or("The tab layout is not ready.")?
     };
-    create(&window, url, bounds)
+    create(&window, url, bounds)?;
+    Ok(window)
 }
 
 // ---------------------------------------------------------
-// Restore closed destinations without reusing WebView labels.
-// Window and document restoration will extend this lifecycle.
+// Keep closed destinations available after a window closes.
+// Full closed-window and document restoration is separate.
 // ---------------------------------------------------------
-pub fn perform(app: &AppHandle, action: &str) -> Result<(), String> {
+pub fn perform(app: &AppHandle, window: &str, action: &str) -> Result<(), String> {
     if matches!(action, "next-tab" | "previous-tab") {
         let label = {
-            let state = app.state::<Mutex<Tabs>>();
-            let tabs = state.lock().map_err(|error| error.to_string())?;
+            let state = app.state::<Mutex<Windows>>();
+            let windows = state.lock().map_err(|error| error.to_string())?;
+            let tabs = windows
+                .entries
+                .get(window)
+                .ok_or("The window is no longer available.")?;
             let count = tabs.entries.len();
             let index = tabs
                 .entries
@@ -199,29 +236,29 @@ pub fn perform(app: &AppHandle, action: &str) -> Result<(), String> {
             };
             tabs.entries[next].label.clone()
         };
-        return select(app, &label);
+        return select(app, window, &label);
     }
-
     if action == "new-tab" {
-        open(
+        let window = open(
             app,
+            window,
             tauri::Url::parse("about:blank").map_err(|error| error.to_string())?,
         )?;
         #[cfg(target_os = "macos")]
-        crate::native_toolbar::perform("focus-address");
+        crate::native_toolbar::perform(window.label(), "focus-address");
         return Ok(());
     }
     if action == "reopen-tab" {
         let url = app
-            .state::<Mutex<Tabs>>()
+            .state::<Mutex<Windows>>()
             .lock()
             .map_err(|error| error.to_string())?
             .closed
             .last()
             .cloned();
         if let Some(url) = url {
-            open(app, url)?;
-            app.state::<Mutex<Tabs>>()
+            open(app, window, url)?;
+            app.state::<Mutex<Windows>>()
                 .lock()
                 .map_err(|error| error.to_string())?
                 .closed
@@ -232,8 +269,8 @@ pub fn perform(app: &AppHandle, action: &str) -> Result<(), String> {
     if action != "close-tab" {
         return Ok(());
     }
-    let content = active(app).ok_or("The active tab is no longer available.")?;
-    close_tab(app, content.label())
+    let content = active(app, window).ok_or("The active tab is no longer available.")?;
+    close_tab(app, window, content.label())
 }
 
 pub fn current_url(content: &Webview) -> Result<tauri::Url, String> {
@@ -254,27 +291,30 @@ pub fn current_url(content: &Webview) -> Result<tauri::Url, String> {
                 let _ = sender.try_send(url);
             })
             .map_err(|error| error.to_string())?;
-        let url = receiver
+        receiver
             .try_recv()
-            .map_err(|_| "Tab actions must run on the main thread.")?;
-        Ok(url)
+            .map_err(|_| "Tab actions must run on the main thread.".into())
     }
     #[cfg(not(target_os = "macos"))]
     content.url().map_err(|error| error.to_string())
 }
 
-pub fn close_tab(app: &AppHandle, label: &str) -> Result<(), String> {
+pub fn close_tab(app: &AppHandle, window: &str, label: &str) -> Result<(), String> {
     let content = app
         .get_webview(label)
         .ok_or("The tab is no longer available.")?;
     let url = current_url(&content)?;
     let (index, next, was_active) = {
-        let state = app.state::<Mutex<Tabs>>();
-        let tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get(window)
+            .ok_or("The window is no longer available.")?;
         let index = tabs
             .entries
             .iter()
-            .position(|tab| tab.label == content.label())
+            .position(|tab| tab.label == label)
             .ok_or("Unknown tab.")?;
         let next = tabs
             .entries
@@ -296,19 +336,23 @@ pub fn close_tab(app: &AppHandle, label: &str) -> Result<(), String> {
         )
     };
     if was_active && let Some(next) = &next {
-        select(app, next)?;
+        select(app, window, next)?;
     }
     content.close().map_err(|error| error.to_string())?;
     {
-        let state = app.state::<Mutex<Tabs>>();
-        let mut tabs = state.lock().map_err(|error| error.to_string())?;
+        let state = app.state::<Mutex<Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window)
+            .ok_or("The window is no longer available.")?;
         tabs.entries.remove(index);
-        tabs.closed.push(url);
-        if tabs.closed.len() > 20 {
-            tabs.closed.remove(0);
-        }
         if next.is_none() {
             tabs.active.clear();
+        }
+        windows.closed.push(url);
+        if windows.closed.len() > 20 {
+            windows.closed.remove(0);
         }
     }
     if next.is_none() {
@@ -318,7 +362,7 @@ pub fn close_tab(app: &AppHandle, label: &str) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     } else {
         #[cfg(target_os = "macos")]
-        crate::native_toolbar::update_tabs(app);
+        crate::native_toolbar::update_tabs(app, window);
     }
     Ok(())
 }
