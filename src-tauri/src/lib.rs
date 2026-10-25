@@ -43,7 +43,8 @@ fn content_bounds(window: &tauri::Window, viewport_height: f64) -> tauri::Result
                 .get(window.label())
                 .map(|tabs| tabs.sidebar_width)
         })
-        .unwrap_or(0.0);
+        .unwrap_or(0.0)
+        .min((size.width - 160.0).max(0.0));
     Ok(tauri::Rect {
         position: LogicalPosition::new(sidebar_width, top).into(),
         size: LogicalSize::new(

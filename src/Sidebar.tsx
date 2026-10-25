@@ -149,6 +149,7 @@ export default function Sidebar({
       setWidth((value: number): number =>
         Math.min(value, Math.max(220, window.innerWidth - 160)),
       );
+    constrainWidth();
     window.addEventListener("resize", constrainWidth);
     return (): void => window.removeEventListener("resize", constrainWidth);
   }, []);
@@ -667,7 +668,7 @@ export default function Sidebar({
           aria-label="Sidebar width"
           aria-orientation="vertical"
           aria-valuemin={220}
-          aria-valuemax={480}
+          aria-valuemax={Math.max(220, Math.min(480, window.innerWidth - 160))}
           aria-valuenow={width}
           tabIndex={open ? 0 : -1}
           onPointerDown={resize}
@@ -687,7 +688,11 @@ export default function Sidebar({
               setWidth(
                 Math.max(
                   220,
-                  Math.min(480, width + (event.key === "ArrowLeft" ? -10 : 10)),
+                  Math.min(
+                    480,
+                    window.innerWidth - 160,
+                    width + (event.key === "ArrowLeft" ? -10 : 10),
+                  ),
                 ),
               );
             }
