@@ -71,6 +71,7 @@ struct ToolbarControls {
     address_item: Retained<NSToolbarItem>,
     address_width: Retained<NSLayoutConstraint>,
     loading: Cell<Option<bool>>,
+    new_tab_item: Retained<NSToolbarItem>,
 }
 
 // ---------------------------------------------------------
@@ -89,13 +90,13 @@ define_class!(
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
         fn default_items(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
             unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier,
-                ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier]) }
+                ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed_items(&self, toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
             let _ = toolbar;
-            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier]) }
+            unsafe { NSArray::from_slice(&[ns_string!("history"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("address"), NSToolbarFlexibleSpaceItemIdentifier, ns_string!("new-tab")]) }
         }
 
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
@@ -103,6 +104,7 @@ define_class!(
             match identifier.to_string().as_str() {
                 "history" => Some(self.ivars().history_item.clone()),
                 "address" => Some(self.ivars().address_item.clone()),
+                "new-tab" => Some(self.ivars().new_tab_item.clone()),
                 _ => None,
             }
         }
@@ -125,7 +127,7 @@ define_class!(
                 unsafe { _editor.selectAll(None); }
             } else {
                 controls.window.makeFirstResponder(None);
-                if let Some(content) = controls.handle.get_webview("content") {
+                if let Some(content) = crate::tabs::active(&controls.handle) {
                     let _ = content.set_focus();
                 }
             }
@@ -141,7 +143,7 @@ define_class!(
             let controls = self.ivars();
             let address = controls.address.stringValue().to_string();
             let result = crate::resolve_address(&address).and_then(|url| {
-                controls.handle.get_webview("content").ok_or_else(|| String::from("The browser WebView is not ready."))?
+                crate::tabs::active(&controls.handle).ok_or_else(|| String::from("The browser WebView is not ready."))?
                     .navigate(url).map_err(|error| error.to_string())
             });
             if let Err(error) = result {
@@ -152,12 +154,17 @@ define_class!(
                 return;
             }
             if let Some(window) = controls.address.window() { window.makeFirstResponder(None); }
-            if let Some(content) = controls.handle.get_webview("content") { let _ = content.set_focus(); }
+            if let Some(content) = crate::tabs::active(&controls.handle) { let _ = content.set_focus(); }
         }
 
         #[unsafe(method(navigateHistory:))]
         fn navigate_history(&self, sender: &NSSegmentedControl) {
             perform(if sender.selectedSegment() == 0 { "back" } else { "forward" });
+        }
+
+        #[unsafe(method(newTab:))]
+        fn new_tab(&self, _sender: &NSObject) {
+            if let Err(error) = crate::tabs::perform(&self.ivars().handle, "new-tab") { eprintln!("Could not create tab: {error}"); }
         }
 
         #[unsafe(method(reloadOrStop:))]
@@ -280,6 +287,18 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     address_item.setLabel(ns_string!("Address and Search"));
     address_item.setAutovalidates(false);
     address_item.setEnabled(true);
+    let new_tab_item =
+        NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), ns_string!("new-tab"));
+    new_tab_item.setLabel(ns_string!("New Tab"));
+    new_tab_item.setImage(
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("plus"),
+            Some(ns_string!("New Tab")),
+        )
+        .as_deref(),
+    );
+    new_tab_item.setAutovalidates(false);
+    new_tab_item.setEnabled(true);
     let delegate = BrowserToolbar::alloc(mtm).set_ivars(ToolbarControls {
         window: native.clone(),
         handle: window.app_handle().clone(),
@@ -291,10 +310,13 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
         address_item,
         address_width,
         loading: Cell::new(None),
+        new_tab_item,
     });
     let delegate: Retained<BrowserToolbar> = unsafe { msg_send![super(delegate), init] };
     let controls = delegate.ivars();
     unsafe {
+        controls.new_tab_item.setTarget(Some(&delegate));
+        controls.new_tab_item.setAction(Some(sel!(newTab:)));
         controls.address.setTarget(Some(&delegate));
         controls.address.setAction(Some(sel!(navigate:)));
         controls
@@ -318,6 +340,7 @@ pub fn install(window: &tauri::Window) -> Result<(), Box<dyn std::error::Error>>
     TOOLBAR.with(|slot| {
         *slot.borrow_mut() = Some(delegate);
     });
+    crate::native_tabs::install(window)?;
     Ok(())
 }
 
@@ -336,7 +359,12 @@ pub fn update(state: &NavigationState) {
         controls
             .history
             .setEnabled_forSegment(state.can_go_forward, 1);
-        *controls.address.ivars().url.borrow_mut() = state.url.clone();
+        let address = if state.url == "about:blank" {
+            String::new()
+        } else {
+            state.url.clone()
+        };
+        *controls.address.ivars().url.borrow_mut() = address.clone();
         if controls.address.currentEditor().is_none() {
             if controls.address.alignment() != NSTextAlignment::Center {
                 controls.address.setAlignment(NSTextAlignment::Center);
@@ -344,7 +372,7 @@ pub fn update(state: &NavigationState) {
             let display = tauri::Url::parse(&state.url)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
-                .unwrap_or_else(|| state.url.clone());
+                .unwrap_or(address);
             controls
                 .address
                 .setStringValue(&NSString::from_str(&display));
@@ -389,6 +417,7 @@ pub fn update(state: &NavigationState) {
 }
 
 pub fn remove() {
+    crate::native_tabs::remove();
     TOOLBAR.with(|slot| {
         slot.borrow_mut().take();
     });
@@ -420,7 +449,7 @@ pub fn perform(action: &str) {
             }
             return;
         }
-        let Some(content) = controls.handle.get_webview("content") else {
+        let Some(content) = crate::tabs::active(&controls.handle) else {
             return;
         };
         let action = action.to_string();
@@ -442,4 +471,40 @@ pub fn perform(action: &str) {
             }
         });
     });
+}
+
+// ---------------------------------------------------------
+// End the old tab's edit before displaying the new address.
+// The next native poll supplies its history and load state.
+// ---------------------------------------------------------
+pub fn tab_changed(app: &tauri::AppHandle) {
+    TOOLBAR.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(toolbar) = borrowed.as_ref() else {
+            return;
+        };
+        let controls = toolbar.ivars();
+        controls.window.makeFirstResponder(None);
+        let url = crate::tabs::active(app)
+            .and_then(|content| crate::tabs::current_url(&content).ok())
+            .map(|url| url.to_string())
+            .unwrap_or_default();
+        let address = if url == "about:blank" {
+            String::new()
+        } else {
+            url
+        };
+        *controls.address.ivars().url.borrow_mut() = address.clone();
+        controls
+            .address
+            .setStringValue(&NSString::from_str(&address));
+        controls.history.setEnabled_forSegment(false, 0);
+        controls.history.setEnabled_forSegment(false, 1);
+        controls.progress.setHidden(true);
+    });
+    update_tabs(app);
+}
+
+pub fn update_tabs(app: &tauri::AppHandle) {
+    crate::native_tabs::update(app);
 }
