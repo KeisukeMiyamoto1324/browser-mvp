@@ -1,5 +1,7 @@
 mod browser_data;
 #[cfg(target_os = "macos")]
+mod native_popup;
+#[cfg(target_os = "macos")]
 mod native_tabs;
 #[cfg(target_os = "macos")]
 mod native_toolbar;
@@ -331,6 +333,22 @@ async fn history_recent(webview: Webview) -> Result<Vec<browser_data::SessionWin
         .collect())
 }
 
+// ---------------------------------------------------------
+// Deliver history requests after the local listener is ready.
+// A remote-only popup can route the request to a local window.
+// ---------------------------------------------------------
+#[tauri::command]
+async fn history_requested(webview: Webview) -> Result<bool, String> {
+    browser_content(&webview)?;
+    let state = webview.state::<Mutex<tabs::Windows>>();
+    let mut windows = state.lock().map_err(|error| error.to_string())?;
+    let tabs = windows
+        .entries
+        .get_mut(webview.window().label())
+        .ok_or("Missing window.")?;
+    Ok(std::mem::take(&mut tabs.pending_history))
+}
+
 #[tauri::command]
 async fn history_visible(webview: Webview, visible: bool) -> Result<(), String> {
     browser_content(&webview)?;
@@ -538,8 +556,10 @@ fn initialize_window(window: &tauri::Window) -> Result<(), Box<dyn std::error::E
         .entry(window.label().to_string())
         .or_insert_with(|| tabs::Tabs {
             pending_address: Some(tauri::Url::parse("about:blank").expect("valid blank URL")),
+            local_toolbar: true,
             ..Default::default()
-        });
+        })
+        .local_toolbar = true;
     #[cfg(target_os = "macos")]
     native_toolbar::install(window)?;
     tabs::create(window, "about:blank".parse()?, content_bounds(window, 0.0)?)?;
@@ -574,6 +594,7 @@ fn create_window(
             label.clone(),
             tabs::Tabs {
                 pending_address: Some(address),
+                local_toolbar: true,
                 ..Default::default()
             },
         );
@@ -616,6 +637,121 @@ fn create_window(
         native_toolbar::perform(&label, "focus-address");
     }
     Ok(window)
+}
+
+// ---------------------------------------------------------
+// Use a separate remote-only window with the opener's config.
+// The native request loads its destination after this returns.
+// ---------------------------------------------------------
+fn create_popup(
+    app: &tauri::AppHandle,
+    opener: &str,
+    features: tauri::webview::NewWindowFeatures,
+) -> Result<tauri::WebviewWindow, String> {
+    let label = {
+        let state = app.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let persistent = windows
+            .entries
+            .get(opener)
+            .ok_or("The opener window is no longer available.")?
+            .persistent;
+        windows.next_id += 1;
+        let label = format!("popup-{}", windows.next_id);
+        windows.entries.insert(
+            label.clone(),
+            tabs::Tabs {
+                persistent,
+                toolbar_ready: true,
+                active: label.clone(),
+                entries: vec![tabs::Tab {
+                    label: label.clone(),
+                    title: String::new(),
+                    url: "about:blank".into(),
+                    interaction: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        );
+        label
+    };
+    let build = || -> Result<tauri::WebviewWindow, String> {
+        let handle = app.clone();
+        let source = label.clone();
+        let popup = tauri::WebviewWindowBuilder::new(
+            app,
+            &label,
+            tauri::WebviewUrl::External(tauri::Url::parse("about:blank").expect("valid blank URL")),
+        )
+        .title("browser")
+        .inner_size(1100.0, 760.0)
+        .min_inner_size(420.0, 300.0)
+        .window_features(features)
+        .on_navigation(tabs::allowed_destination)
+        .on_page_load(|view, payload| tabs::page_loaded(view.as_ref().clone(), payload))
+        .on_document_title_changed(|view, title| tabs::update_title(view.as_ref().clone(), title))
+        .on_new_window(move |url, features| tabs::requested_window(&handle, &source, url, features))
+        .build()
+        .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            let owner = app
+                .get_window(&label)
+                .ok_or("The popup window is not ready.")?;
+            native_toolbar::install(&owner).map_err(|error| error.to_string())?;
+            native_popup::install(&popup).map_err(|error| error.to_string())?;
+        }
+        let _ = app.emit("tabs-changed", ());
+        Ok(popup)
+    };
+    match build() {
+        Ok(popup) => Ok(popup),
+        Err(error) => {
+            if let Some(window) = app.get_window(&label) {
+                let _ = window.close();
+            }
+            if let Ok(mut windows) = app.state::<Mutex<tabs::Windows>>().lock() {
+                windows.entries.remove(&label);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn show_history(app: &tauri::AppHandle, preferred: &str) -> Result<(), String> {
+    let owner = {
+        let state = app.state::<Mutex<tabs::Windows>>();
+        let windows = state.lock().map_err(|error| error.to_string())?;
+        if windows.owns_toolbar(preferred, preferred) {
+            Some(preferred.to_string())
+        } else {
+            windows
+                .entries
+                .keys()
+                .filter(|label| windows.owns_toolbar(label, label))
+                .min()
+                .cloned()
+        }
+    };
+    let window = match owner.and_then(|owner| app.get_window(&owner)) {
+        Some(window) => window,
+        None => create_window(app, None, None)?,
+    };
+    {
+        let state = app.state::<Mutex<tabs::Windows>>();
+        let mut windows = state.lock().map_err(|error| error.to_string())?;
+        let tabs = windows
+            .entries
+            .get_mut(window.label())
+            .ok_or("Missing history window.")?;
+        tabs.pending_history = true;
+    }
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    window
+        .emit("show-history", ())
+        .map_err(|error| error.to_string())
 }
 
 fn focused_window(app: &tauri::AppHandle) -> Option<tauri::Window> {
@@ -734,11 +870,16 @@ pub fn run() {
             }
             let window = focused_window(app);
             if action == "show-history" {
-                if let Some(window) = window {
-                    let _ = window.emit("show-history", ());
+                let preferred = window
+                    .as_ref()
+                    .map(|window| window.label())
+                    .unwrap_or_default();
+                if let Err(error) = show_history(app, preferred) {
+                    eprintln!("Could not show history: {error}");
                 }
                 return;
             }
+
             if action == "close-window" {
                 if let Some(window) = window {
                     let _ = window.close();
@@ -843,7 +984,10 @@ pub fn run() {
             }
             if let tauri::WindowEvent::Destroyed = event {
                 #[cfg(target_os = "macos")]
-                native_toolbar::remove(window.label());
+                {
+                    native_popup::remove(window.label());
+                    native_toolbar::remove(window.label());
+                }
                 if let Ok(mut windows) = window.state::<Mutex<tabs::Windows>>().lock() {
                     windows.entries.remove(window.label());
                     windows.closed_last_window = windows.entries.is_empty();
@@ -864,6 +1008,7 @@ pub fn run() {
             history_query,
             history_clear,
             history_visible,
+            history_requested,
             history_reopen,
             history_recent,
             start_page::get_start_page,
@@ -977,18 +1122,31 @@ mod tests {
     #[test]
     fn toolbar_access_stays_with_its_registered_window() {
         let mut windows = super::tabs::Windows::default();
-        windows
-            .entries
-            .insert("main".into(), super::tabs::Tabs::default());
-        windows
-            .entries
-            .insert("window-1".into(), super::tabs::Tabs::default());
+        windows.entries.insert(
+            "main".into(),
+            super::tabs::Tabs {
+                local_toolbar: true,
+                ..Default::default()
+            },
+        );
+        windows.entries.insert(
+            "window-1".into(),
+            super::tabs::Tabs {
+                local_toolbar: true,
+                ..Default::default()
+            },
+        );
         assert!(windows.owns_toolbar("main", "main"));
         assert!(windows.owns_toolbar("window-1", "window-1"));
         assert!(!windows.owns_toolbar("content-main-1", "main"));
         assert!(!windows.owns_toolbar("content-window-1-1", "window-1"));
         assert!(!windows.owns_toolbar("main", "window-1"));
         assert!(!windows.owns_toolbar("window-99", "window-99"));
+        windows
+            .entries
+            .insert("popup-2".into(), super::tabs::Tabs::default());
+        assert!(!windows.owns_toolbar("popup-2", "popup-2"));
+
         windows.entries.remove("window-1");
         assert!(!windows.owns_toolbar("window-1", "window-1"));
     }
@@ -1011,6 +1169,30 @@ mod tests {
         ] {
             let url = tauri::Url::parse(input).map_err(|e| e.to_string())?;
             assert!(!is_web_address(&url));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn popup_destinations_allow_blank_and_web_only() -> Result<(), String> {
+        for address in [
+            "about:blank",
+            "http://127.0.0.1:19320/child",
+            "https://example.com/",
+        ] {
+            assert!(super::tabs::allowed_destination(
+                &tauri::Url::parse(address).map_err(|error| error.to_string())?
+            ));
+        }
+        for address in [
+            "about:config",
+            "file:///tmp/child",
+            "javascript:alert(1)",
+            "tauri://localhost/",
+            "mailto:test@example.invalid",
+        ] {
+            let url = tauri::Url::parse(address).map_err(|error| error.to_string())?;
+            assert!(!super::tabs::allowed_destination(&url));
         }
         Ok(())
     }
